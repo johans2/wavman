@@ -195,30 +195,37 @@ func Render(p Params) []float32 {
 				sample = 3 - 4*ph
 			}
 		case Noise:
-			holdSamples := 1
-			if p.NoisePitchEnabled && p.NoisePitch > 0 {
-				holdSamples = int(float64(p.SampleRate) / p.NoisePitch)
-				if holdSamples < 1 {
-					holdSamples = 1
-				}
-			}
-			if noiseHoldRemain <= 0 {
-				if p.NoiseMetallic {
-					// NES short-mode LFSR: 15-bit shift register, feedback = bit0 XOR bit6.
+			if p.NoiseMetallic {
+				// NES short-mode LFSR: 15-bit shift register, feedback = bit0 XOR bit6,
+				// period 93. Naively clocked at our 44.1 kHz output rate the fundamental
+				// is only ~474 Hz (a low beep). The NES clocks it at up to ~447 kHz for a
+				// ~4.8 kHz "metallic" tone, so we oversample by 8 to push the fundamental
+				// to ~3.8 kHz — squarely in metallic-clang territory.
+				const lfsrStepsPerSample = 8
+				for k := 0; k < lfsrStepsPerSample; k++ {
 					bit := (lfsr ^ (lfsr >> 6)) & 1
 					lfsr = (lfsr >> 1) | (bit << 14)
-					if lfsr&1 == 0 {
-						noiseHoldVal = 1
-					} else {
-						noiseHoldVal = -1
-					}
-				} else {
-					noiseHoldVal = rand.Float64()*2 - 1
 				}
-				noiseHoldRemain = holdSamples
+				if lfsr&1 == 0 {
+					sample = 1
+				} else {
+					sample = -1
+				}
+			} else {
+				holdSamples := 1
+				if p.NoisePitchEnabled && p.NoisePitch > 0 {
+					holdSamples = int(float64(p.SampleRate) / p.NoisePitch)
+					if holdSamples < 1 {
+						holdSamples = 1
+					}
+				}
+				if noiseHoldRemain <= 0 {
+					noiseHoldVal = rand.Float64()*2 - 1
+					noiseHoldRemain = holdSamples
+				}
+				sample = noiseHoldVal
+				noiseHoldRemain--
 			}
-			sample = noiseHoldVal
-			noiseHoldRemain--
 
 			if p.NoiseFilterEnabled && p.NoiseFilterCutoff > 0 {
 				// One-pole IIR low-pass: y[n] = y[n-1] + a*(x[n] - y[n-1])
@@ -239,26 +246,18 @@ func Render(p Params) []float32 {
 		}
 	}
 	if p.EightBit {
-		// NES-style: 4-bit quantization (matches the 2A03's effective DAC depth)
-		// combined with 3x sample-and-hold (44.1 kHz / 3 ≈ 14.7 kHz, the NES audio
-		// bandwidth).
+		// 4-bit quantization (16 levels) — matches the NES 2A03's effective DAC
+		// depth and is the iconic stepped/chiptune character.
 		const bits = 4
-		const decimate = 3
 		step := float32(2.0 / float64(int(1)<<bits))
-		for i := 0; i < len(out); i += decimate {
+		for i := range out {
 			v := float32(math.Round(float64(out[i]/step))) * step
 			if v > 1 {
 				v = 1
 			} else if v < -1 {
 				v = -1
 			}
-			end := i + decimate
-			if end > len(out) {
-				end = len(out)
-			}
-			for j := i; j < end; j++ {
-				out[j] = v
-			}
+			out[i] = v
 		}
 	}
 	if p.Reverse {
