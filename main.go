@@ -99,10 +99,12 @@ type UI struct {
 	duration, startFreq, endFreq                    *sliderState
 	attack, decay, sustain, release, volume         *sliderState
 
-	playBtn, mutateBtn, exportBtn widget.Clickable
-	presetBtns                    map[string]*widget.Clickable
-	waveformBtns                  []widget.Clickable
-	waveformChoice                int
+	playBtn, backBtn, forwardBtn, exportBtn widget.Clickable
+	presetBtns                              map[string]*widget.Clickable
+	waveformBtns                            []widget.Clickable
+	waveformChoice                          int
+
+	history *History
 
 	autoPlay        widget.Bool
 	autoPlayAt      time.Time
@@ -143,6 +145,7 @@ func newUI(player *Player) *UI {
 	for _, name := range PresetNames {
 		ui.presetBtns[name] = &widget.Clickable{}
 	}
+	ui.history = NewHistory(p)
 	ui.regenerate()
 	return ui
 }
@@ -267,9 +270,11 @@ func clampF(v, lo, hi float64) float64 {
 
 func (ui *UI) layout(gtx layout.Context, th *material.Theme) layout.Dimensions {
 	immediatePlay := false
+	pushOnChange := false
 	for i := range ui.waveformBtns {
 		if ui.waveformBtns[i].Clicked(gtx) {
 			ui.waveformChoice = i
+			pushOnChange = true
 			if ui.autoPlay.Value {
 				immediatePlay = true
 			}
@@ -277,18 +282,35 @@ func (ui *UI) layout(gtx layout.Context, th *material.Theme) layout.Dimensions {
 	}
 	for _, name := range PresetNames {
 		if ui.presetBtns[name].Clicked(gtx) {
+			ui.history.SetCurrent(ui.readParams())
 			ui.params = ApplyPreset(name)
 			ui.syncSlidersFromParams()
 			ui.regenerate()
+			ui.history.Push(ui.params)
 			ui.play()
 		}
 	}
 	if ui.playBtn.Clicked(gtx) {
 		ui.play()
 	}
-	if ui.mutateBtn.Clicked(gtx) {
-		ui.mutate()
+	if ui.backBtn.Clicked(gtx) && ui.history.CanBack() {
+		ui.history.SetCurrent(ui.readParams())
+		ui.params = ui.history.Back()
+		ui.syncSlidersFromParams()
 		ui.regenerate()
+		ui.play()
+	}
+	if ui.forwardBtn.Clicked(gtx) {
+		ui.history.SetCurrent(ui.readParams())
+		if ui.history.AtEnd() {
+			ui.mutate()
+			ui.regenerate()
+			ui.history.Push(ui.params)
+		} else {
+			ui.params = ui.history.Forward()
+			ui.syncSlidersFromParams()
+			ui.regenerate()
+		}
 		ui.play()
 	}
 	if ui.exportBtn.Clicked(gtx) {
@@ -298,6 +320,11 @@ func (ui *UI) layout(gtx layout.Context, th *material.Theme) layout.Dimensions {
 	if newP := ui.readParams(); newP != ui.params {
 		ui.params = newP
 		ui.regenerate()
+		if pushOnChange {
+			ui.history.Push(ui.params)
+		} else {
+			ui.history.SetCurrent(ui.params)
+		}
 		if ui.autoPlay.Value {
 			if immediatePlay {
 				ui.play()
@@ -393,8 +420,23 @@ func (ui *UI) topBar(gtx layout.Context, th *material.Theme) layout.Dimensions {
 			return layout.Inset{Right: unit.Dp(6)}.Layout(gtx, btn.Layout)
 		}),
 		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-			btn := material.Button(th, &ui.mutateBtn, "Mutate")
+			btn := material.Button(th, &ui.backBtn, "◄")
+			if ui.history.CanBack() {
+				btn.Background = color.NRGBA{R: 180, G: 130, B: 60, A: 255}
+			} else {
+				btn.Background = color.NRGBA{R: 80, G: 80, B: 90, A: 255}
+			}
+			btn.Inset = layout.Inset{Top: 6, Bottom: 6, Left: 12, Right: 12}
+			return layout.Inset{Right: unit.Dp(2)}.Layout(gtx, btn.Layout)
+		}),
+		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+			label := "►"
+			if ui.history.AtEnd() {
+				label = "► Mutate"
+			}
+			btn := material.Button(th, &ui.forwardBtn, label)
 			btn.Background = color.NRGBA{R: 180, G: 130, B: 60, A: 255}
+			btn.Inset = layout.Inset{Top: 6, Bottom: 6, Left: 12, Right: 12}
 			return layout.Inset{Right: unit.Dp(6)}.Layout(gtx, btn.Layout)
 		}),
 		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
