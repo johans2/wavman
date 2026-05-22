@@ -55,6 +55,14 @@ type Params struct {
 	ArpSemitone1 float64 // semitones offset for step 2
 	ArpSemitone2 float64 // semitones offset for step 3
 	ArpRate      float64 // Hz — steps per second (3 steps per full cycle)
+
+	NoisePitchEnabled bool
+	NoisePitch        float64 // Hz; sample-and-hold rate. Lower = lower-pitched noise.
+
+	NoiseMetallic bool // when true, use NES 15-bit short-mode LFSR instead of uniform random.
+
+	NoiseFilterEnabled bool
+	NoiseFilterCutoff  float64 // Hz; one-pole low-pass cutoff.
 }
 
 func DefaultParams() Params {
@@ -69,12 +77,14 @@ func DefaultParams() Params {
 		Sustain:      0.70,
 		Release:      0.20,
 		Volume:       0.80,
-		Duty:         0.5,
-		VibratoDepth: 30,
-		VibratoRate:  6,
-		ArpSemitone1: 4,
-		ArpSemitone2: 7,
-		ArpRate:      16,
+		Duty:              0.5,
+		VibratoDepth:      30,
+		VibratoRate:       6,
+		ArpSemitone1:      4,
+		ArpSemitone2:      7,
+		ArpRate:           16,
+		NoisePitch:        4000,
+		NoiseFilterCutoff: 2000,
 	}
 }
 
@@ -129,6 +139,14 @@ func Render(p Params) []float32 {
 	phase := 0.0
 	twoPi := 2 * math.Pi
 
+	// Noise generator state (persists across samples).
+	var (
+		lfsr            uint16 = 1
+		noiseHoldVal    float64
+		noiseHoldRemain int
+		noiseFilterY    float64
+	)
+
 	for i := 0; i < n; i++ {
 		t := float64(i) / float64(p.SampleRate)
 		progress := t / p.Duration
@@ -177,7 +195,39 @@ func Render(p Params) []float32 {
 				sample = 3 - 4*ph
 			}
 		case Noise:
-			sample = rand.Float64()*2 - 1
+			holdSamples := 1
+			if p.NoisePitchEnabled && p.NoisePitch > 0 {
+				holdSamples = int(float64(p.SampleRate) / p.NoisePitch)
+				if holdSamples < 1 {
+					holdSamples = 1
+				}
+			}
+			if noiseHoldRemain <= 0 {
+				if p.NoiseMetallic {
+					// NES short-mode LFSR: 15-bit shift register, feedback = bit0 XOR bit6.
+					bit := (lfsr ^ (lfsr >> 6)) & 1
+					lfsr = (lfsr >> 1) | (bit << 14)
+					if lfsr&1 == 0 {
+						noiseHoldVal = 1
+					} else {
+						noiseHoldVal = -1
+					}
+				} else {
+					noiseHoldVal = rand.Float64()*2 - 1
+				}
+				noiseHoldRemain = holdSamples
+			}
+			sample = noiseHoldVal
+			noiseHoldRemain--
+
+			if p.NoiseFilterEnabled && p.NoiseFilterCutoff > 0 {
+				// One-pole IIR low-pass: y[n] = y[n-1] + a*(x[n] - y[n-1])
+				rc := 1.0 / (2 * math.Pi * p.NoiseFilterCutoff)
+				dt := 1.0 / float64(p.SampleRate)
+				a := dt / (rc + dt)
+				noiseFilterY += a * (sample - noiseFilterY)
+				sample = noiseFilterY
+			}
 		}
 
 		env := Envelope(t, p.Duration, p.Attack, p.Decay, p.Sustain, p.Release)

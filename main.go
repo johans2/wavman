@@ -101,8 +101,10 @@ type UI struct {
 	duty                                            *sliderState
 	vibratoDepth, vibratoRate                       *sliderState
 	arpSemi1, arpSemi2, arpRate                     *sliderState
+	noisePitch, noiseFilterCutoff                   *sliderState
 
-	dutyEnabled, vibratoEnabled, arpEnabled widget.Bool
+	dutyEnabled, vibratoEnabled, arpEnabled                  widget.Bool
+	noisePitchEnabled, noiseMetallic, noiseFilterEnabled     widget.Bool
 
 	playBtn, backBtn, forwardBtn, exportBtn widget.Clickable
 	presetBtns                              map[string]*widget.Clickable
@@ -149,6 +151,8 @@ func newUI(player *Player) *UI {
 		arpSemi1:       newSlider("Tone 2", -12, 24, p.ArpSemitone1, func(v float64) string { return fmt.Sprintf("%+.0f st", v) }),
 		arpSemi2:       newSlider("Tone 3", -12, 24, p.ArpSemitone2, func(v float64) string { return fmt.Sprintf("%+.0f st", v) }),
 		arpRate:        newSlider("Rate", 4, 32, p.ArpRate, func(v float64) string { return fmt.Sprintf("%.0f Hz", v) }),
+		noisePitch:     newSlider("Pitch", 100, 22050, p.NoisePitch, func(v float64) string { return fmt.Sprintf("%.0f Hz", v) }),
+		noiseFilterCutoff: newSlider("Cutoff", 100, 20000, p.NoiseFilterCutoff, func(v float64) string { return fmt.Sprintf("%.0f Hz", v) }),
 		presetBtns:     make(map[string]*widget.Clickable),
 		waveformBtns:   make([]widget.Clickable, len(WaveformNames)),
 		waveformChoice: int(p.Waveform),
@@ -183,6 +187,11 @@ func (ui *UI) readParams() Params {
 	p.ArpSemitone1 = ui.arpSemi1.Get()
 	p.ArpSemitone2 = ui.arpSemi2.Get()
 	p.ArpRate = ui.arpRate.Get()
+	p.NoisePitchEnabled = ui.noisePitchEnabled.Value
+	p.NoisePitch = ui.noisePitch.Get()
+	p.NoiseMetallic = ui.noiseMetallic.Value
+	p.NoiseFilterEnabled = ui.noiseFilterEnabled.Value
+	p.NoiseFilterCutoff = ui.noiseFilterCutoff.Get()
 	p.SampleRate = sampleRate
 	return p
 }
@@ -208,6 +217,11 @@ func (ui *UI) syncSlidersFromParams() {
 	ui.arpSemi1.Set(ui.params.ArpSemitone1)
 	ui.arpSemi2.Set(ui.params.ArpSemitone2)
 	ui.arpRate.Set(ui.params.ArpRate)
+	ui.noisePitchEnabled.Value = ui.params.NoisePitchEnabled
+	ui.noisePitch.Set(ui.params.NoisePitch)
+	ui.noiseMetallic.Value = ui.params.NoiseMetallic
+	ui.noiseFilterEnabled.Value = ui.params.NoiseFilterEnabled
+	ui.noiseFilterCutoff.Set(ui.params.NoiseFilterCutoff)
 }
 
 func (ui *UI) regenerate() {
@@ -530,8 +544,38 @@ func (ui *UI) leftPanel(gtx layout.Context, th *material.Theme) layout.Dimension
 			layout.Rigid(sectionTitle(th, "Modulation")),
 			layout.Rigid(spacer(4)),
 			layout.Rigid(func(gtx layout.Context) layout.Dimensions { return ui.modulationContent(gtx, th) }),
+			layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+				if ui.waveformChoice != int(Noise) {
+					return layout.Dimensions{}
+				}
+				return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
+					layout.Rigid(spacer(12)),
+					layout.Rigid(sectionTitle(th, "Noise")),
+					layout.Rigid(spacer(4)),
+					layout.Rigid(func(gtx layout.Context) layout.Dimensions { return ui.noiseContent(gtx, th) }),
+				)
+			}),
 		)
 	})
+}
+
+func (ui *UI) noiseContent(gtx layout.Context, th *material.Theme) layout.Dimensions {
+	children := []layout.FlexChild{
+		layout.Rigid(moduleHeader(th, &ui.noisePitchEnabled, "Pitch (sample-and-hold)")),
+	}
+	if ui.noisePitchEnabled.Value {
+		children = append(children, layout.Rigid(func(gtx layout.Context) layout.Dimensions { return ui.noisePitch.Layout(th, gtx) }))
+	}
+	children = append(children,
+		layout.Rigid(spacer(6)),
+		layout.Rigid(moduleHeader(th, &ui.noiseMetallic, "Metallic (NES short LFSR)")),
+		layout.Rigid(spacer(6)),
+		layout.Rigid(moduleHeader(th, &ui.noiseFilterEnabled, "Low-pass filter")),
+	)
+	if ui.noiseFilterEnabled.Value {
+		children = append(children, layout.Rigid(func(gtx layout.Context) layout.Dimensions { return ui.noiseFilterCutoff.Layout(th, gtx) }))
+	}
+	return layout.Flex{Axis: layout.Vertical}.Layout(gtx, children...)
 }
 
 func moduleHeader(th *material.Theme, b *widget.Bool, label string) layout.Widget {
