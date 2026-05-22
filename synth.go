@@ -41,7 +41,8 @@ type Params struct {
 
 	Volume float64 // 0..1
 
-	Reverse bool
+	Reverse  bool
+	EightBit bool
 }
 
 func DefaultParams() Params {
@@ -145,6 +146,29 @@ func Render(p Params) []float32 {
 		phase += twoPi * freq / float64(p.SampleRate)
 		if phase > twoPi {
 			phase -= twoPi
+		}
+	}
+	if p.EightBit {
+		// NES-style: 4-bit quantization (matches the 2A03's effective DAC depth)
+		// combined with 3x sample-and-hold (44.1 kHz / 3 ≈ 14.7 kHz, the NES audio
+		// bandwidth).
+		const bits = 4
+		const decimate = 3
+		step := float32(2.0 / float64(int(1)<<bits))
+		for i := 0; i < len(out); i += decimate {
+			v := float32(math.Round(float64(out[i]/step))) * step
+			if v > 1 {
+				v = 1
+			} else if v < -1 {
+				v = -1
+			}
+			end := i + decimate
+			if end > len(out) {
+				end = len(out)
+			}
+			for j := i; j < end; j++ {
+				out[j] = v
+			}
 		}
 	}
 	if p.Reverse {

@@ -108,7 +108,8 @@ type UI struct {
 	autoPlayAt      time.Time
 	autoPlayPending bool
 
-	reverse widget.Bool
+	reverse  widget.Bool
+	eightBit widget.Bool
 
 	w *app.Window // for Invalidate from goroutines
 
@@ -158,6 +159,7 @@ func (ui *UI) readParams() Params {
 	p.Release = ui.release.Get()
 	p.Volume = ui.volume.Get()
 	p.Reverse = ui.reverse.Value
+	p.EightBit = ui.eightBit.Value
 	p.SampleRate = sampleRate
 	return p
 }
@@ -173,6 +175,7 @@ func (ui *UI) syncSlidersFromParams() {
 	ui.volume.Set(ui.params.Volume)
 	ui.waveformChoice = int(ui.params.Waveform)
 	ui.reverse.Value = ui.params.Reverse
+	ui.eightBit.Value = ui.params.EightBit
 }
 
 func (ui *UI) regenerate() {
@@ -369,6 +372,11 @@ func (ui *UI) topBar(gtx layout.Context, th *material.Theme) layout.Dimensions {
 	}
 	children = append(children,
 		layout.Flexed(1, spacer(0)),
+		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+			cb := material.CheckBox(th, &ui.eightBit, "8-bit")
+			cb.Color = color.NRGBA{R: 220, G: 225, B: 235, A: 255}
+			return layout.Inset{Right: unit.Dp(12)}.Layout(gtx, cb.Layout)
+		}),
 		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
 			cb := material.CheckBox(th, &ui.reverse, "Reverse")
 			cb.Color = color.NRGBA{R: 220, G: 225, B: 235, A: 255}
