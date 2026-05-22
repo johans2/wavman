@@ -108,6 +108,8 @@ type UI struct {
 	autoPlayAt      time.Time
 	autoPlayPending bool
 
+	reverse widget.Bool
+
 	w *app.Window // for Invalidate from goroutines
 
 	statusMu    sync.Mutex
@@ -155,6 +157,7 @@ func (ui *UI) readParams() Params {
 	p.Sustain = ui.sustain.Get()
 	p.Release = ui.release.Get()
 	p.Volume = ui.volume.Get()
+	p.Reverse = ui.reverse.Value
 	p.SampleRate = sampleRate
 	return p
 }
@@ -169,6 +172,7 @@ func (ui *UI) syncSlidersFromParams() {
 	ui.release.Set(ui.params.Release)
 	ui.volume.Set(ui.params.Volume)
 	ui.waveformChoice = int(ui.params.Waveform)
+	ui.reverse.Value = ui.params.Reverse
 }
 
 func (ui *UI) regenerate() {
@@ -197,7 +201,7 @@ func (ui *UI) mutate() {
 
 func (ui *UI) export() {
 	samples := ui.samples
-	defaultName := fmt.Sprintf("wavgen_%s.wav", time.Now().Format("20060102_150405"))
+	defaultName := fmt.Sprintf("wavman_%s.wav", time.Now().Format("20060102_150405"))
 	cwd, _ := os.Getwd()
 	go func() {
 		path, err := zenity.SelectFileSave(
@@ -366,6 +370,11 @@ func (ui *UI) topBar(gtx layout.Context, th *material.Theme) layout.Dimensions {
 	children = append(children,
 		layout.Flexed(1, spacer(0)),
 		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+			cb := material.CheckBox(th, &ui.reverse, "Reverse")
+			cb.Color = color.NRGBA{R: 220, G: 225, B: 235, A: 255}
+			return layout.Inset{Right: unit.Dp(12)}.Layout(gtx, cb.Layout)
+		}),
+		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
 			cb := material.CheckBox(th, &ui.autoPlay, "Auto-play")
 			cb.Color = color.NRGBA{R: 220, G: 225, B: 235, A: 255}
 			return layout.Inset{Right: unit.Dp(12)}.Layout(gtx, cb.Layout)
@@ -507,7 +516,7 @@ func main() {
 	go func() {
 		w := new(app.Window)
 		w.Option(
-			app.Title("wavgen — WAV sound generator"),
+			app.Title("wavman — WAV sound generator"),
 			app.Size(unit.Dp(1100), unit.Dp(720)),
 		)
 		if err := run(w); err != nil {

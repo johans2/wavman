@@ -1,4 +1,4 @@
-module wavgen
+module wavman
 
 go 1.25.0
 

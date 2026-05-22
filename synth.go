@@ -40,6 +40,8 @@ type Params struct {
 	Release float64 // seconds
 
 	Volume float64 // 0..1
+
+	Reverse bool
 }
 
 func DefaultParams() Params {
@@ -143,6 +145,11 @@ func Render(p Params) []float32 {
 		phase += twoPi * freq / float64(p.SampleRate)
 		if phase > twoPi {
 			phase -= twoPi
+		}
+	}
+	if p.Reverse {
+		for i, j := 0, len(out)-1; i < j; i, j = i+1, j-1 {
+			out[i], out[j] = out[j], out[i]
 		}
 	}
 	return out
