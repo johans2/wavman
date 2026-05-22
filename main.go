@@ -98,6 +98,11 @@ type UI struct {
 
 	duration, startFreq, endFreq                    *sliderState
 	attack, decay, sustain, release, volume         *sliderState
+	duty                                            *sliderState
+	vibratoDepth, vibratoRate                       *sliderState
+	arpSemi1, arpSemi2, arpRate                     *sliderState
+
+	dutyEnabled, vibratoEnabled, arpEnabled widget.Bool
 
 	playBtn, backBtn, forwardBtn, exportBtn widget.Clickable
 	presetBtns                              map[string]*widget.Clickable
@@ -138,6 +143,12 @@ func newUI(player *Player) *UI {
 		sustain:        newSlider("Sustain", 0, 1, p.Sustain, fmtAmp),
 		release:        newSlider("Release", 0, 1.5, p.Release, fmtSec),
 		volume:         newSlider("Volume", 0, 1, p.Volume, fmtAmp),
+		duty:           newSlider("Duty", 0.05, 0.95, p.Duty, func(v float64) string { return fmt.Sprintf("%.0f%%", v*100) }),
+		vibratoDepth:   newSlider("Depth", 0, 100, p.VibratoDepth, func(v float64) string { return fmt.Sprintf("%.0f c", v) }),
+		vibratoRate:    newSlider("Rate", 0.5, 20, p.VibratoRate, func(v float64) string { return fmt.Sprintf("%.1f Hz", v) }),
+		arpSemi1:       newSlider("Tone 2", -12, 24, p.ArpSemitone1, func(v float64) string { return fmt.Sprintf("%+.0f st", v) }),
+		arpSemi2:       newSlider("Tone 3", -12, 24, p.ArpSemitone2, func(v float64) string { return fmt.Sprintf("%+.0f st", v) }),
+		arpRate:        newSlider("Rate", 4, 32, p.ArpRate, func(v float64) string { return fmt.Sprintf("%.0f Hz", v) }),
 		presetBtns:     make(map[string]*widget.Clickable),
 		waveformBtns:   make([]widget.Clickable, len(WaveformNames)),
 		waveformChoice: int(p.Waveform),
@@ -163,6 +174,15 @@ func (ui *UI) readParams() Params {
 	p.Volume = ui.volume.Get()
 	p.Reverse = ui.reverse.Value
 	p.EightBit = ui.eightBit.Value
+	p.DutyEnabled = ui.dutyEnabled.Value
+	p.Duty = ui.duty.Get()
+	p.VibratoEnabled = ui.vibratoEnabled.Value
+	p.VibratoDepth = ui.vibratoDepth.Get()
+	p.VibratoRate = ui.vibratoRate.Get()
+	p.ArpEnabled = ui.arpEnabled.Value
+	p.ArpSemitone1 = ui.arpSemi1.Get()
+	p.ArpSemitone2 = ui.arpSemi2.Get()
+	p.ArpRate = ui.arpRate.Get()
 	p.SampleRate = sampleRate
 	return p
 }
@@ -179,6 +199,15 @@ func (ui *UI) syncSlidersFromParams() {
 	ui.waveformChoice = int(ui.params.Waveform)
 	ui.reverse.Value = ui.params.Reverse
 	ui.eightBit.Value = ui.params.EightBit
+	ui.dutyEnabled.Value = ui.params.DutyEnabled
+	ui.duty.Set(ui.params.Duty)
+	ui.vibratoEnabled.Value = ui.params.VibratoEnabled
+	ui.vibratoDepth.Set(ui.params.VibratoDepth)
+	ui.vibratoRate.Set(ui.params.VibratoRate)
+	ui.arpEnabled.Value = ui.params.ArpEnabled
+	ui.arpSemi1.Set(ui.params.ArpSemitone1)
+	ui.arpSemi2.Set(ui.params.ArpSemitone2)
+	ui.arpRate.Set(ui.params.ArpRate)
 }
 
 func (ui *UI) regenerate() {
@@ -497,8 +526,52 @@ func (ui *UI) leftPanel(gtx layout.Context, th *material.Theme) layout.Dimension
 					layout.Rigid(func(gtx layout.Context) layout.Dimensions { return ui.volume.Layout(th, gtx) }),
 				)
 			}),
+			layout.Rigid(spacer(12)),
+			layout.Rigid(sectionTitle(th, "Modulation")),
+			layout.Rigid(spacer(4)),
+			layout.Rigid(func(gtx layout.Context) layout.Dimensions { return ui.modulationContent(gtx, th) }),
 		)
 	})
+}
+
+func moduleHeader(th *material.Theme, b *widget.Bool, label string) layout.Widget {
+	return func(gtx layout.Context) layout.Dimensions {
+		cb := material.CheckBox(th, b, label)
+		cb.Color = color.NRGBA{R: 200, G: 215, B: 235, A: 255}
+		cb.Font.Weight = font.Bold
+		return cb.Layout(gtx)
+	}
+}
+
+func (ui *UI) modulationContent(gtx layout.Context, th *material.Theme) layout.Dimensions {
+	children := []layout.FlexChild{
+		layout.Rigid(moduleHeader(th, &ui.dutyEnabled, "Duty cycle (Square only)")),
+	}
+	if ui.dutyEnabled.Value {
+		children = append(children, layout.Rigid(func(gtx layout.Context) layout.Dimensions { return ui.duty.Layout(th, gtx) }))
+	}
+	children = append(children,
+		layout.Rigid(spacer(6)),
+		layout.Rigid(moduleHeader(th, &ui.vibratoEnabled, "Vibrato")),
+	)
+	if ui.vibratoEnabled.Value {
+		children = append(children,
+			layout.Rigid(func(gtx layout.Context) layout.Dimensions { return ui.vibratoDepth.Layout(th, gtx) }),
+			layout.Rigid(func(gtx layout.Context) layout.Dimensions { return ui.vibratoRate.Layout(th, gtx) }),
+		)
+	}
+	children = append(children,
+		layout.Rigid(spacer(6)),
+		layout.Rigid(moduleHeader(th, &ui.arpEnabled, "Arpeggio")),
+	)
+	if ui.arpEnabled.Value {
+		children = append(children,
+			layout.Rigid(func(gtx layout.Context) layout.Dimensions { return ui.arpSemi1.Layout(th, gtx) }),
+			layout.Rigid(func(gtx layout.Context) layout.Dimensions { return ui.arpSemi2.Layout(th, gtx) }),
+			layout.Rigid(func(gtx layout.Context) layout.Dimensions { return ui.arpRate.Layout(th, gtx) }),
+		)
+	}
+	return layout.Flex{Axis: layout.Vertical}.Layout(gtx, children...)
 }
 
 func (ui *UI) rightPanel(gtx layout.Context, th *material.Theme) layout.Dimensions {
@@ -567,7 +640,7 @@ func main() {
 		w := new(app.Window)
 		w.Option(
 			app.Title("wavman — WAV sound generator"),
-			app.Size(unit.Dp(1100), unit.Dp(720)),
+			app.Size(unit.Dp(1100), unit.Dp(820)),
 		)
 		if err := run(w); err != nil {
 			log.Fatal(err)

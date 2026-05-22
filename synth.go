@@ -43,20 +43,38 @@ type Params struct {
 
 	Reverse  bool
 	EightBit bool
+
+	DutyEnabled bool
+	Duty        float64 // 0.05..0.95 for Square wave; 0.5 = symmetric
+
+	VibratoEnabled bool
+	VibratoDepth   float64 // cents (semitone = 100 cents)
+	VibratoRate    float64 // Hz
+
+	ArpEnabled   bool
+	ArpSemitone1 float64 // semitones offset for step 2
+	ArpSemitone2 float64 // semitones offset for step 3
+	ArpRate      float64 // Hz — steps per second (3 steps per full cycle)
 }
 
 func DefaultParams() Params {
 	return Params{
-		Waveform:   Sine,
-		Duration:   0.5,
-		SampleRate: 44100,
-		StartFreq:  440,
-		EndFreq:    440,
-		Attack:     0.01,
-		Decay:      0.10,
-		Sustain:    0.70,
-		Release:    0.20,
-		Volume:     0.80,
+		Waveform:     Sine,
+		Duration:     0.5,
+		SampleRate:   44100,
+		StartFreq:    440,
+		EndFreq:      440,
+		Attack:       0.01,
+		Decay:        0.10,
+		Sustain:      0.70,
+		Release:      0.20,
+		Volume:       0.80,
+		Duty:         0.5,
+		VibratoDepth: 30,
+		VibratoRate:  6,
+		ArpSemitone1: 4,
+		ArpSemitone2: 7,
+		ArpRate:      16,
 	}
 }
 
@@ -116,12 +134,34 @@ func Render(p Params) []float32 {
 		progress := t / p.Duration
 		freq := p.StartFreq + (p.EndFreq-p.StartFreq)*progress
 
+		if p.VibratoEnabled && p.VibratoDepth > 0 {
+			cents := p.VibratoDepth * math.Sin(2*math.Pi*p.VibratoRate*t)
+			freq *= math.Pow(2, cents/1200)
+		}
+		if p.ArpEnabled && p.ArpRate > 0 {
+			step := int(math.Floor(t*p.ArpRate)) % 3
+			var semis float64
+			switch step {
+			case 1:
+				semis = p.ArpSemitone1
+			case 2:
+				semis = p.ArpSemitone2
+			}
+			if semis != 0 {
+				freq *= math.Pow(2, semis/12)
+			}
+		}
+
 		var sample float64
 		switch p.Waveform {
 		case Sine:
 			sample = math.Sin(phase)
 		case Square:
-			if math.Mod(phase, twoPi) < math.Pi {
+			duty := 0.5
+			if p.DutyEnabled {
+				duty = p.Duty
+			}
+			if math.Mod(phase, twoPi)/twoPi < duty {
 				sample = 1
 			} else {
 				sample = -1
