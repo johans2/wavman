@@ -56,6 +56,10 @@ type Params struct {
 	ArpSemitone2 float64 // semitones offset for step 3
 	ArpRate      float64 // Hz — steps per second (3 steps per full cycle)
 
+	TremoloEnabled bool
+	TremoloDepth   float64 // 0..1 — fraction of volume the LFO can dip
+	TremoloRate    float64 // Hz
+
 	NoisePitchEnabled bool
 	NoisePitch        float64 // Hz; sample-and-hold rate. Lower = lower-pitched noise.
 
@@ -83,6 +87,8 @@ func DefaultParams() Params {
 		ArpSemitone1:      4,
 		ArpSemitone2:      7,
 		ArpRate:           16,
+		TremoloDepth:      0.5,
+		TremoloRate:       8,
 		NoisePitch:        4000,
 		NoiseFilterCutoff: 2000,
 	}
@@ -238,7 +244,12 @@ func Render(p Params) []float32 {
 		}
 
 		env := Envelope(t, p.Duration, p.Attack, p.Decay, p.Sustain, p.Release)
-		out[i] = float32(sample * env * p.Volume)
+		amp := p.Volume
+		if p.TremoloEnabled && p.TremoloDepth > 0 {
+			lfo := 0.5 * (1 + math.Sin(2*math.Pi*p.TremoloRate*t))
+			amp *= 1 - p.TremoloDepth + p.TremoloDepth*lfo
+		}
+		out[i] = float32(sample * env * amp)
 
 		phase += twoPi * freq / float64(p.SampleRate)
 		if phase > twoPi {

@@ -101,12 +101,15 @@ type UI struct {
 	duty                                            *sliderState
 	vibratoDepth, vibratoRate                       *sliderState
 	arpSemi1, arpSemi2, arpRate                     *sliderState
+	tremoloDepth, tremoloRate                       *sliderState
 	noisePitch, noiseFilterCutoff                   *sliderState
 
-	dutyEnabled, vibratoEnabled, arpEnabled                  widget.Bool
-	noisePitchEnabled, noiseMetallic, noiseFilterEnabled     widget.Bool
+	dutyEnabled, vibratoEnabled, arpEnabled, tremoloEnabled widget.Bool
+	noisePitchEnabled, noiseMetallic, noiseFilterEnabled    widget.Bool
 
 	playBtn, backBtn, forwardBtn, exportBtn widget.Clickable
+	saveBtn, loadBtn                        widget.Clickable
+	pendingLoad                             atomic.Pointer[Params]
 	presetBtns                              map[string]*widget.Clickable
 	waveformBtns                            []widget.Clickable
 	waveformChoice                          int
@@ -151,6 +154,8 @@ func newUI(player *Player) *UI {
 		arpSemi1:       newSlider("Tone 2", -12, 24, p.ArpSemitone1, func(v float64) string { return fmt.Sprintf("%+.0f st", v) }),
 		arpSemi2:       newSlider("Tone 3", -12, 24, p.ArpSemitone2, func(v float64) string { return fmt.Sprintf("%+.0f st", v) }),
 		arpRate:        newSlider("Rate", 4, 32, p.ArpRate, func(v float64) string { return fmt.Sprintf("%.0f Hz", v) }),
+		tremoloDepth:   newSlider("Depth", 0, 1, p.TremoloDepth, func(v float64) string { return fmt.Sprintf("%.2f", v) }),
+		tremoloRate:    newSlider("Rate", 0.5, 20, p.TremoloRate, func(v float64) string { return fmt.Sprintf("%.1f Hz", v) }),
 		noisePitch:     newSlider("Pitch", 100, 22050, p.NoisePitch, func(v float64) string { return fmt.Sprintf("%.0f Hz", v) }),
 		noiseFilterCutoff: newSlider("Cutoff", 100, 20000, p.NoiseFilterCutoff, func(v float64) string { return fmt.Sprintf("%.0f Hz", v) }),
 		presetBtns:     make(map[string]*widget.Clickable),
@@ -187,6 +192,9 @@ func (ui *UI) readParams() Params {
 	p.ArpSemitone1 = ui.arpSemi1.Get()
 	p.ArpSemitone2 = ui.arpSemi2.Get()
 	p.ArpRate = ui.arpRate.Get()
+	p.TremoloEnabled = ui.tremoloEnabled.Value
+	p.TremoloDepth = ui.tremoloDepth.Get()
+	p.TremoloRate = ui.tremoloRate.Get()
 	p.NoisePitchEnabled = ui.noisePitchEnabled.Value
 	p.NoisePitch = ui.noisePitch.Get()
 	p.NoiseMetallic = ui.noiseMetallic.Value
@@ -217,6 +225,9 @@ func (ui *UI) syncSlidersFromParams() {
 	ui.arpSemi1.Set(ui.params.ArpSemitone1)
 	ui.arpSemi2.Set(ui.params.ArpSemitone2)
 	ui.arpRate.Set(ui.params.ArpRate)
+	ui.tremoloEnabled.Value = ui.params.TremoloEnabled
+	ui.tremoloDepth.Set(ui.params.TremoloDepth)
+	ui.tremoloRate.Set(ui.params.TremoloRate)
 	ui.noisePitchEnabled.Value = ui.params.NoisePitchEnabled
 	ui.noisePitch.Set(ui.params.NoisePitch)
 	ui.noiseMetallic.Value = ui.params.NoiseMetallic
@@ -277,6 +288,63 @@ func (ui *UI) export() {
 	}()
 }
 
+func (ui *UI) savePreset() {
+	p := ui.params
+	defaultName := fmt.Sprintf("preset_%s.json", time.Now().Format("20060102_150405"))
+	cwd, _ := os.Getwd()
+	go func() {
+		path, err := zenity.SelectFileSave(
+			zenity.Title("Save preset"),
+			zenity.Filename(filepath.Join(cwd, defaultName)),
+			zenity.FileFilters{{Name: "Preset (JSON)", Patterns: []string{"*.json"}, CaseFold: true}},
+			zenity.ConfirmOverwrite(),
+		)
+		if errors.Is(err, zenity.ErrCanceled) {
+			return
+		}
+		if err != nil {
+			ui.setStatus("Save dialog failed: "+err.Error(), 6*time.Second)
+			return
+		}
+		if !strings.EqualFold(filepath.Ext(path), ".json") {
+			path += ".json"
+		}
+		if err := SaveParams(path, p); err != nil {
+			ui.setStatus("Save preset failed: "+err.Error(), 6*time.Second)
+			return
+		}
+		ui.setStatus("Saved preset: "+path, 6*time.Second)
+	}()
+}
+
+func (ui *UI) loadPreset() {
+	cwd, _ := os.Getwd()
+	go func() {
+		path, err := zenity.SelectFile(
+			zenity.Title("Load preset"),
+			zenity.Filename(cwd),
+			zenity.FileFilters{{Name: "Preset (JSON)", Patterns: []string{"*.json"}, CaseFold: true}},
+		)
+		if errors.Is(err, zenity.ErrCanceled) {
+			return
+		}
+		if err != nil {
+			ui.setStatus("Load dialog failed: "+err.Error(), 6*time.Second)
+			return
+		}
+		p, err := LoadParams(path)
+		if err != nil {
+			ui.setStatus("Load failed: "+err.Error(), 6*time.Second)
+			return
+		}
+		ui.pendingLoad.Store(&p)
+		ui.setStatus("Loaded preset: "+path, 6*time.Second)
+		if ui.w != nil {
+			ui.w.Invalidate()
+		}
+	}()
+}
+
 func (ui *UI) setStatus(msg string, dur time.Duration) {
 	ui.statusMu.Lock()
 	ui.statusMsg = msg
@@ -312,6 +380,16 @@ func clampF(v, lo, hi float64) float64 {
 }
 
 func (ui *UI) layout(gtx layout.Context, th *material.Theme) layout.Dimensions {
+	// Apply a pending preset load (handed off from a goroutine via atomic).
+	if loaded := ui.pendingLoad.Swap(nil); loaded != nil {
+		ui.history.SetCurrent(ui.readParams())
+		ui.params = *loaded
+		ui.syncSlidersFromParams()
+		ui.regenerate()
+		ui.history.Push(ui.params)
+		ui.play()
+	}
+
 	immediatePlay := false
 	pushOnChange := false
 	for i := range ui.waveformBtns {
@@ -358,6 +436,12 @@ func (ui *UI) layout(gtx layout.Context, th *material.Theme) layout.Dimensions {
 	}
 	if ui.exportBtn.Clicked(gtx) {
 		ui.export()
+	}
+	if ui.saveBtn.Clicked(gtx) {
+		ui.savePreset()
+	}
+	if ui.loadBtn.Clicked(gtx) {
+		ui.loadPreset()
 	}
 
 	if newP := ui.readParams(); newP != ui.params {
@@ -523,6 +607,23 @@ func (ui *UI) leftPanel(gtx layout.Context, th *material.Theme) layout.Dimension
 				}
 				return layout.Flex{Axis: layout.Vertical}.Layout(gtx, items...)
 			}),
+			layout.Rigid(spacer(6)),
+			layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+				return layout.Flex{Axis: layout.Horizontal}.Layout(gtx,
+					layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
+						btn := material.Button(th, &ui.saveBtn, "Save…")
+						btn.Background = color.NRGBA{R: 90, G: 110, B: 170, A: 255}
+						btn.CornerRadius = unit.Dp(4)
+						return layout.Inset{Top: unit.Dp(2), Bottom: unit.Dp(2), Left: unit.Dp(2), Right: unit.Dp(2)}.Layout(gtx, btn.Layout)
+					}),
+					layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
+						btn := material.Button(th, &ui.loadBtn, "Load…")
+						btn.Background = color.NRGBA{R: 90, G: 110, B: 170, A: 255}
+						btn.CornerRadius = unit.Dp(4)
+						return layout.Inset{Top: unit.Dp(2), Bottom: unit.Dp(2), Left: unit.Dp(2), Right: unit.Dp(2)}.Layout(gtx, btn.Layout)
+					}),
+				)
+			}),
 			layout.Rigid(spacer(12)),
 			layout.Rigid(sectionTitle(th, "Parameters")),
 			layout.Rigid(spacer(4)),
@@ -613,6 +714,16 @@ func (ui *UI) modulationContent(gtx layout.Context, th *material.Theme) layout.D
 			layout.Rigid(func(gtx layout.Context) layout.Dimensions { return ui.arpSemi1.Layout(th, gtx) }),
 			layout.Rigid(func(gtx layout.Context) layout.Dimensions { return ui.arpSemi2.Layout(th, gtx) }),
 			layout.Rigid(func(gtx layout.Context) layout.Dimensions { return ui.arpRate.Layout(th, gtx) }),
+		)
+	}
+	children = append(children,
+		layout.Rigid(spacer(6)),
+		layout.Rigid(moduleHeader(th, &ui.tremoloEnabled, "Tremolo")),
+	)
+	if ui.tremoloEnabled.Value {
+		children = append(children,
+			layout.Rigid(func(gtx layout.Context) layout.Dimensions { return ui.tremoloDepth.Layout(th, gtx) }),
+			layout.Rigid(func(gtx layout.Context) layout.Dimensions { return ui.tremoloRate.Layout(th, gtx) }),
 		)
 	}
 	return layout.Flex{Axis: layout.Vertical}.Layout(gtx, children...)
