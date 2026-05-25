@@ -63,7 +63,8 @@ type Params struct {
 	NoisePitchEnabled bool
 	NoisePitch        float64 // Hz; sample-and-hold rate. Lower = lower-pitched noise.
 
-	NoiseMetallic bool // when true, use NES 15-bit short-mode LFSR instead of uniform random.
+	NoiseMetallic bool    // when true, use NES 15-bit short-mode LFSR instead of uniform random.
+	MetallicPitch float64 // Hz; fundamental of the metallic LFSR tone (LFSR clocked at 93 × this).
 
 	NoiseFilterEnabled bool
 	NoiseFilterCutoff  float64 // Hz; one-pole low-pass cutoff.
@@ -90,6 +91,7 @@ func DefaultParams() Params {
 		TremoloDepth:      0.5,
 		TremoloRate:       8,
 		NoisePitch:        4000,
+		MetallicPitch:     3800,
 		NoiseFilterCutoff: 2000,
 	}
 }
@@ -148,6 +150,7 @@ func Render(p Params) []float32 {
 	// Noise generator state (persists across samples).
 	var (
 		lfsr            uint16 = 1
+		lfsrPhase       float64
 		noiseHoldVal    float64
 		noiseHoldRemain int
 		noiseFilterY    float64
@@ -203,14 +206,15 @@ func Render(p Params) []float32 {
 		case Noise:
 			if p.NoiseMetallic {
 				// NES short-mode LFSR: 15-bit shift register, feedback = bit0 XOR bit6,
-				// period 93. Naively clocked at our 44.1 kHz output rate the fundamental
-				// is only ~474 Hz (a low beep). The NES clocks it at up to ~447 kHz for a
-				// ~4.8 kHz "metallic" tone, so we oversample by 8 to push the fundamental
-				// to ~3.8 kHz — squarely in metallic-clang territory.
-				const lfsrStepsPerSample = 8
-				for k := 0; k < lfsrStepsPerSample; k++ {
+				// period 93. Output fundamental = LFSR clock / 93. A fractional phase
+				// accumulator advances the LFSR by clockHz/sampleRate steps per output
+				// sample, so the metallic pitch is continuously controllable from a slow
+				// rattle up to a high clang regardless of output sample rate.
+				lfsrPhase += 93.0 * p.MetallicPitch / float64(p.SampleRate)
+				for lfsrPhase >= 1 {
 					bit := (lfsr ^ (lfsr >> 6)) & 1
 					lfsr = (lfsr >> 1) | (bit << 14)
+					lfsrPhase--
 				}
 				if lfsr&1 == 0 {
 					sample = 1

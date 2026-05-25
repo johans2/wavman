@@ -102,7 +102,7 @@ type UI struct {
 	vibratoDepth, vibratoRate                       *sliderState
 	arpSemi1, arpSemi2, arpRate                     *sliderState
 	tremoloDepth, tremoloRate                       *sliderState
-	noisePitch, noiseFilterCutoff                   *sliderState
+	noisePitch, metallicPitch, noiseFilterCutoff    *sliderState
 
 	dutyEnabled, vibratoEnabled, arpEnabled, tremoloEnabled widget.Bool
 	noisePitchEnabled, noiseMetallic, noiseFilterEnabled    widget.Bool
@@ -157,6 +157,7 @@ func newUI(player *Player) *UI {
 		tremoloDepth:   newSlider("Depth", 0, 1, p.TremoloDepth, func(v float64) string { return fmt.Sprintf("%.2f", v) }),
 		tremoloRate:    newSlider("Rate", 0.5, 20, p.TremoloRate, func(v float64) string { return fmt.Sprintf("%.1f Hz", v) }),
 		noisePitch:     newSlider("Pitch", 100, 22050, p.NoisePitch, func(v float64) string { return fmt.Sprintf("%.0f Hz", v) }),
+		metallicPitch:  newSlider("Pitch", 30, 5000, p.MetallicPitch, func(v float64) string { return fmt.Sprintf("%.0f Hz", v) }),
 		noiseFilterCutoff: newSlider("Cutoff", 100, 20000, p.NoiseFilterCutoff, func(v float64) string { return fmt.Sprintf("%.0f Hz", v) }),
 		presetBtns:     make(map[string]*widget.Clickable),
 		waveformBtns:   make([]widget.Clickable, len(WaveformNames)),
@@ -198,6 +199,7 @@ func (ui *UI) readParams() Params {
 	p.NoisePitchEnabled = ui.noisePitchEnabled.Value
 	p.NoisePitch = ui.noisePitch.Get()
 	p.NoiseMetallic = ui.noiseMetallic.Value
+	p.MetallicPitch = ui.metallicPitch.Get()
 	p.NoiseFilterEnabled = ui.noiseFilterEnabled.Value
 	p.NoiseFilterCutoff = ui.noiseFilterCutoff.Get()
 	p.SampleRate = sampleRate
@@ -231,6 +233,7 @@ func (ui *UI) syncSlidersFromParams() {
 	ui.noisePitchEnabled.Value = ui.params.NoisePitchEnabled
 	ui.noisePitch.Set(ui.params.NoisePitch)
 	ui.noiseMetallic.Value = ui.params.NoiseMetallic
+	ui.metallicPitch.Set(ui.params.MetallicPitch)
 	ui.noiseFilterEnabled.Value = ui.params.NoiseFilterEnabled
 	ui.noiseFilterCutoff.Set(ui.params.NoiseFilterCutoff)
 }
@@ -670,6 +673,11 @@ func (ui *UI) noiseContent(gtx layout.Context, th *material.Theme) layout.Dimens
 	children = append(children,
 		layout.Rigid(spacer(6)),
 		layout.Rigid(moduleHeader(th, &ui.noiseMetallic, "Metallic (NES short LFSR)")),
+	)
+	if ui.noiseMetallic.Value {
+		children = append(children, layout.Rigid(func(gtx layout.Context) layout.Dimensions { return ui.metallicPitch.Layout(th, gtx) }))
+	}
+	children = append(children,
 		layout.Rigid(spacer(6)),
 		layout.Rigid(moduleHeader(th, &ui.noiseFilterEnabled, "Low-pass filter")),
 	)

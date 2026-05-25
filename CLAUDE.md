@@ -161,10 +161,11 @@ After the loop:
 ### Noise pipeline (step 5 branch)
 
 - **Metallic on**: 15-bit LFSR with `bit0 XOR bit6` feedback (NES short
-  mode, period 93). Oversampled 8× per output sample so the fundamental is
-  ~3.8 kHz (NES-authentic metallic range), not ~474 Hz (a low beep). Pitch
-  sample-and-hold is ignored in this mode — Metallic is its own
-  self-contained noise source.
+  mode, period 93). The LFSR is driven by a fractional phase accumulator
+  at `93 × MetallicPitch` Hz, so the output fundamental equals the
+  `MetallicPitch` slider value (default 3800 Hz). The Noise Pitch
+  sample-and-hold is ignored in this mode — Metallic has its own pitch
+  control and is its own self-contained noise source.
 - **Metallic off**: uniform random with optional Pitch sample-and-hold:
   hold `N = SampleRate / NoisePitch` output samples per random value
   (effective rate = `NoisePitch` Hz).
