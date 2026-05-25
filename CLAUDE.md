@@ -90,7 +90,7 @@ Optional features ("modules") all follow a consistent pattern:
 
 Current modules:
 - **Reverse**, **Auto-play** — top-bar checkboxes, single toggles.
-- **Duty cycle**, **Vibrato**, **Arpeggio**, **Tremolo**, **Wah-wah**, **8-bit** — Modulation card (always visible).
+- **Duty cycle**, **Vibrato**, **Arpeggio**, **Pulse sweep**, **Tremolo**, **Wah-wah**, **8-bit** — Modulation card (always visible).
 - **Noise Pitch**, **Metallic**, **Filter** — Noise card, visible only when
   the Noise waveform is selected.
 
@@ -122,6 +122,14 @@ value in the real range; `Set()` reverse-maps to the 0..1 widget range.
 Each row renders as `[label] [slider] [formatted value]` via a horizontal
 flex.
 
+### Keyboard shortcuts
+
+The UI struct acts as the keyboard focus tag. At the top of `layout()`,
+`event.Op(gtx.Ops, ui)` registers it as an event target, focus is
+requested once via `key.FocusCmd`, and any matching `key.Event` is
+dispatched. Currently bound: **Space = Play**. To add more keys, extend
+the `key.Filter` set and the switch in the event loop.
+
 ### Auto-play debounce
 
 When the user drags a slider with auto-play on, we don't want to retrigger
@@ -143,31 +151,37 @@ For each output sample `i`:
    `VibratoRate` Hz. Conversion: `freq *= 2^(cents/1200)`.
 4. If Arpeggio enabled: cycles base / +Semi1 / +Semi2 in semitones at
    `ArpRate` steps/sec. Conversion: `freq *= 2^(semis/12)`.
-5. Waveform branch:
+5. If Pulse sweep enabled: emulates the NES 2A03 sweep unit. A running
+   `sweepFactor` is multiplied at each tick of a `SweepRate`-Hz divider
+   by `1/(1±2^-shift)` (sign flipped when `SweepNegate` is set). `freq
+   *= sweepFactor`, then clamped to [10, 12000] Hz so runaway sweeps
+   don't produce silence/NaN. First tick fires after one divider period
+   to match hardware timing.
+6. Waveform branch:
    - **Sine / Saw / Triangle**: phase-based math, phase advances by
      `2π * freq / SampleRate` per sample.
    - **Square**: same, with duty threshold (0.5 default, `Duty` if
      `DutyEnabled`).
    - **Noise**: see below.
-6. If Wah enabled: feed the sample through a Chamberlin state-variable
+7. If Wah enabled: feed the sample through a Chamberlin state-variable
    band-pass filter whose cutoff is swept by a sine LFO. Cutoff =
    `WahCenter * 2^(lfo * WahDepth/2)` (log-symmetric sweep in octaves).
    Q is fixed at 3; output is band-pass tap scaled by 1/Q so wet stays
    near unit level. Not NES-authentic (the 2A03 had no programmable
    filter) but a classic SFX-generator effect.
-7. Multiply by `Envelope(t, Duration, A, D, S, R)`. Envelope auto-scales
+8. Multiply by `Envelope(t, Duration, A, D, S, R)`. Envelope auto-scales
    A+D+R if they exceed Duration.
-8. Multiply by `Volume`.
+9. Multiply by `Volume`.
 
 After the loop:
-9. **8-bit**: bit-depth quantize each sample to `CrushBits` levels
-   (default 4 bits = 16 levels, NES-authentic). Then optional sample-rate
-   reduction: hold each value for `SampleRate / CrushRate` samples to
-   fake a lower effective rate. `CrushRate >= SampleRate` is a no-op
-   (default 44100 = no decimation, matches prior behavior).
-10. **Reverse**: in-place buffer reverse.
+10. **8-bit**: bit-depth quantize each sample to `CrushBits` levels
+    (default 4 bits = 16 levels, NES-authentic). Then optional sample-rate
+    reduction: hold each value for `SampleRate / CrushRate` samples to
+    fake a lower effective rate. `CrushRate >= SampleRate` is a no-op
+    (default 44100 = no decimation, matches prior behavior).
+11. **Reverse**: in-place buffer reverse.
 
-### Noise pipeline (step 5 branch)
+### Noise pipeline (step 6 branch)
 
 - **Metallic on**: 15-bit LFSR with `bit0 XOR bit6` feedback (NES short
   mode, period 93). The LFSR is driven by a fractional phase accumulator

@@ -18,6 +18,8 @@ import (
 	"gioui.org/app"
 	"gioui.org/font"
 	"gioui.org/font/gofont"
+	"gioui.org/io/event"
+	"gioui.org/io/key"
 	"gioui.org/layout"
 	"gioui.org/op"
 	"gioui.org/op/paint"
@@ -103,12 +105,15 @@ type UI struct {
 	arpSemi1, arpSemi2, arpRate                     *sliderState
 	tremoloDepth, tremoloRate                       *sliderState
 	wahCenter, wahDepth, wahRate                    *sliderState
+	sweepShift, sweepRate                           *sliderState
 	noisePitch, metallicPitch, noiseFilterCutoff    *sliderState
 	crushBits, crushRate                            *sliderState
 
 	dutyEnabled, vibratoEnabled, arpEnabled, tremoloEnabled widget.Bool
-	wahEnabled                                              widget.Bool
+	wahEnabled, sweepEnabled, sweepNegate                   widget.Bool
 	noisePitchEnabled, noiseMetallic, noiseFilterEnabled    widget.Bool
+
+	keyFocused bool
 
 	playBtn, backBtn, forwardBtn, mutateBtn, exportBtn widget.Clickable
 	saveBtn, loadBtn                        widget.Clickable
@@ -162,6 +167,8 @@ func newUI(player *Player) *UI {
 		wahCenter:      newSlider("Center", 200, 3000, p.WahCenter, func(v float64) string { return fmt.Sprintf("%.0f Hz", v) }),
 		wahDepth:       newSlider("Depth", 0.5, 4, p.WahDepth, func(v float64) string { return fmt.Sprintf("%.1f oct", v) }),
 		wahRate:        newSlider("Rate", 0.5, 15, p.WahRate, func(v float64) string { return fmt.Sprintf("%.1f Hz", v) }),
+		sweepShift:     newSlider("Shift", 1, 8, p.SweepShift, func(v float64) string { return fmt.Sprintf("%.0f", math.Round(v)) }),
+		sweepRate:      newSlider("Rate", 1, 30, p.SweepRate, func(v float64) string { return fmt.Sprintf("%.0f Hz", v) }),
 		noisePitch:     newSlider("Pitch", 100, 22050, p.NoisePitch, func(v float64) string { return fmt.Sprintf("%.0f Hz", v) }),
 		metallicPitch:  newSlider("Pitch", 30, 5000, p.MetallicPitch, func(v float64) string { return fmt.Sprintf("%.0f Hz", v) }),
 		noiseFilterCutoff: newSlider("Cutoff", 100, 20000, p.NoiseFilterCutoff, func(v float64) string { return fmt.Sprintf("%.0f Hz", v) }),
@@ -210,6 +217,10 @@ func (ui *UI) readParams() Params {
 	p.WahCenter = ui.wahCenter.Get()
 	p.WahDepth = ui.wahDepth.Get()
 	p.WahRate = ui.wahRate.Get()
+	p.SweepEnabled = ui.sweepEnabled.Value
+	p.SweepShift = ui.sweepShift.Get()
+	p.SweepRate = ui.sweepRate.Get()
+	p.SweepNegate = ui.sweepNegate.Value
 	p.NoisePitchEnabled = ui.noisePitchEnabled.Value
 	p.NoisePitch = ui.noisePitch.Get()
 	p.NoiseMetallic = ui.noiseMetallic.Value
@@ -250,6 +261,10 @@ func (ui *UI) syncSlidersFromParams() {
 	ui.wahCenter.Set(ui.params.WahCenter)
 	ui.wahDepth.Set(ui.params.WahDepth)
 	ui.wahRate.Set(ui.params.WahRate)
+	ui.sweepEnabled.Value = ui.params.SweepEnabled
+	ui.sweepShift.Set(ui.params.SweepShift)
+	ui.sweepRate.Set(ui.params.SweepRate)
+	ui.sweepNegate.Value = ui.params.SweepNegate
 	ui.noisePitchEnabled.Value = ui.params.NoisePitchEnabled
 	ui.noisePitch.Set(ui.params.NoisePitch)
 	ui.noiseMetallic.Value = ui.params.NoiseMetallic
@@ -403,6 +418,23 @@ func clampF(v, lo, hi float64) float64 {
 }
 
 func (ui *UI) layout(gtx layout.Context, th *material.Theme) layout.Dimensions {
+	// Global key listener: Space = Play. Register the UI as an event target
+	// and pull any space-key presses. Focus is requested once at startup.
+	event.Op(gtx.Ops, ui)
+	for {
+		ev, ok := gtx.Event(key.Filter{Focus: ui, Name: key.NameSpace})
+		if !ok {
+			break
+		}
+		if ke, ok := ev.(key.Event); ok && ke.State == key.Press {
+			ui.play()
+		}
+	}
+	if !ui.keyFocused {
+		gtx.Execute(key.FocusCmd{Tag: ui})
+		ui.keyFocused = true
+	}
+
 	// Apply a pending preset load (handed off from a goroutine via atomic).
 	if loaded := ui.pendingLoad.Swap(nil); loaded != nil {
 		ui.history.SetCurrent(ui.readParams())
@@ -744,6 +776,21 @@ func (ui *UI) modulationContent(gtx layout.Context, th *material.Theme) layout.D
 			layout.Rigid(func(gtx layout.Context) layout.Dimensions { return ui.arpSemi1.Layout(th, gtx) }),
 			layout.Rigid(func(gtx layout.Context) layout.Dimensions { return ui.arpSemi2.Layout(th, gtx) }),
 			layout.Rigid(func(gtx layout.Context) layout.Dimensions { return ui.arpRate.Layout(th, gtx) }),
+		)
+	}
+	children = append(children,
+		layout.Rigid(spacer(6)),
+		layout.Rigid(moduleHeader(th, &ui.sweepEnabled, "Pulse sweep")),
+	)
+	if ui.sweepEnabled.Value {
+		children = append(children,
+			layout.Rigid(func(gtx layout.Context) layout.Dimensions { return ui.sweepShift.Layout(th, gtx) }),
+			layout.Rigid(func(gtx layout.Context) layout.Dimensions { return ui.sweepRate.Layout(th, gtx) }),
+			layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+				cb := material.CheckBox(th, &ui.sweepNegate, "Sweep up")
+				cb.Color = color.NRGBA{R: 220, G: 225, B: 235, A: 255}
+				return layout.Inset{Left: unit.Dp(80), Top: unit.Dp(2)}.Layout(gtx, cb.Layout)
+			}),
 		)
 	}
 	children = append(children,

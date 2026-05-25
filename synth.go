@@ -58,6 +58,15 @@ type Params struct {
 	ArpSemitone2 float64 // semitones offset for step 3
 	ArpRate      float64 // Hz — steps per second (3 steps per full cycle)
 
+	// Pulse sweep (NES 2A03 sweep unit). On hardware, period is shifted by
+	// `period >> SweepShift` each tick of a divider; adding to period drops
+	// pitch, subtracting (negate) raises it. We model the same recurrence
+	// on freq directly: shift in 1..8, tick rate in Hz, negate flag.
+	SweepEnabled bool
+	SweepShift   float64 // 1..8; smaller = larger per-tick change.
+	SweepRate    float64 // Hz; divider tick rate.
+	SweepNegate  bool    // true = sweep up (period shrinks, pitch rises).
+
 	TremoloEnabled bool
 	TremoloDepth   float64 // 0..1 — fraction of volume the LFO can dip
 	TremoloRate    float64 // Hz
@@ -99,6 +108,8 @@ func DefaultParams() Params {
 		ArpRate:           16,
 		TremoloDepth:      0.5,
 		TremoloRate:       8,
+		SweepShift:        4,
+		SweepRate:         8,
 		WahCenter:         800,
 		WahDepth:          2,
 		WahRate:           5,
@@ -172,6 +183,13 @@ func Render(p Params) []float32 {
 	var (
 		wahLow, wahBand float64
 	)
+	// Pulse sweep state: a running freq multiplier and the next-tick time.
+	// First tick fires after one divider period (matches NES timing).
+	sweepFactor := 1.0
+	sweepNextTick := 0.0
+	if p.SweepEnabled && p.SweepRate > 0 {
+		sweepNextTick = 1.0 / p.SweepRate
+	}
 
 	for i := 0; i < n; i++ {
 		t := float64(i) / float64(p.SampleRate)
@@ -193,6 +211,29 @@ func Render(p Params) []float32 {
 			}
 			if semis != 0 {
 				freq *= math.Pow(2, semis/12)
+			}
+		}
+		if p.SweepEnabled && p.SweepRate > 0 {
+			for t >= sweepNextTick {
+				shift := int(math.Round(p.SweepShift))
+				if shift < 1 {
+					shift = 1
+				} else if shift > 8 {
+					shift = 8
+				}
+				delta := 1.0 / float64(int(1)<<shift)
+				if p.SweepNegate {
+					sweepFactor *= 1.0 / (1.0 - delta)
+				} else {
+					sweepFactor *= 1.0 / (1.0 + delta)
+				}
+				sweepNextTick += 1.0 / p.SweepRate
+			}
+			freq *= sweepFactor
+			if freq < 10 {
+				freq = 10
+			} else if freq > 12000 {
+				freq = 12000
 			}
 		}
 
