@@ -90,7 +90,7 @@ Optional features ("modules") all follow a consistent pattern:
 
 Current modules:
 - **Reverse**, **Auto-play** — top-bar checkboxes, single toggles.
-- **Duty cycle**, **Vibrato**, **Arpeggio**, **Tremolo**, **8-bit** — Modulation card (always visible).
+- **Duty cycle**, **Vibrato**, **Arpeggio**, **Tremolo**, **Wah-wah**, **8-bit** — Modulation card (always visible).
 - **Noise Pitch**, **Metallic**, **Filter** — Noise card, visible only when
   the Noise waveform is selected.
 
@@ -148,17 +148,23 @@ For each output sample `i`:
    - **Square**: same, with duty threshold (0.5 default, `Duty` if
      `DutyEnabled`).
    - **Noise**: see below.
-6. Multiply by `Envelope(t, Duration, A, D, S, R)`. Envelope auto-scales
+6. If Wah enabled: feed the sample through a Chamberlin state-variable
+   band-pass filter whose cutoff is swept by a sine LFO. Cutoff =
+   `WahCenter * 2^(lfo * WahDepth/2)` (log-symmetric sweep in octaves).
+   Q is fixed at 3; output is band-pass tap scaled by 1/Q so wet stays
+   near unit level. Not NES-authentic (the 2A03 had no programmable
+   filter) but a classic SFX-generator effect.
+7. Multiply by `Envelope(t, Duration, A, D, S, R)`. Envelope auto-scales
    A+D+R if they exceed Duration.
-7. Multiply by `Volume`.
+8. Multiply by `Volume`.
 
 After the loop:
-8. **8-bit**: bit-depth quantize each sample to `CrushBits` levels
+9. **8-bit**: bit-depth quantize each sample to `CrushBits` levels
    (default 4 bits = 16 levels, NES-authentic). Then optional sample-rate
    reduction: hold each value for `SampleRate / CrushRate` samples to
    fake a lower effective rate. `CrushRate >= SampleRate` is a no-op
    (default 44100 = no decimation, matches prior behavior).
-9. **Reverse**: in-place buffer reverse.
+10. **Reverse**: in-place buffer reverse.
 
 ### Noise pipeline (step 5 branch)
 

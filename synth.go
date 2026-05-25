@@ -62,6 +62,11 @@ type Params struct {
 	TremoloDepth   float64 // 0..1 — fraction of volume the LFO can dip
 	TremoloRate    float64 // Hz
 
+	WahEnabled bool
+	WahCenter  float64 // Hz; center cutoff the LFO sweeps around
+	WahDepth   float64 // octaves; total sweep range, split symmetrically around center
+	WahRate    float64 // Hz; LFO rate
+
 	NoisePitchEnabled bool
 	NoisePitch        float64 // Hz; sample-and-hold rate. Lower = lower-pitched noise.
 
@@ -94,6 +99,9 @@ func DefaultParams() Params {
 		ArpRate:           16,
 		TremoloDepth:      0.5,
 		TremoloRate:       8,
+		WahCenter:         800,
+		WahDepth:          2,
+		WahRate:           5,
 		NoisePitch:        4000,
 		MetallicPitch:     3800,
 		NoiseFilterCutoff: 2000,
@@ -158,6 +166,11 @@ func Render(p Params) []float32 {
 		noiseHoldVal    float64
 		noiseHoldRemain int
 		noiseFilterY    float64
+	)
+	// Wah-wah state: Chamberlin state-variable band-pass filter.
+	const wahQ = 3.0
+	var (
+		wahLow, wahBand float64
 	)
 
 	for i := 0; i < n; i++ {
@@ -251,6 +264,24 @@ func Render(p Params) []float32 {
 			}
 		}
 
+		if p.WahEnabled && p.WahCenter > 0 {
+			// Sine LFO sweeps cutoff log-symmetrically: center * 2^(lfo * depth/2).
+			lfo := math.Sin(2 * math.Pi * p.WahRate * t)
+			cutoff := p.WahCenter * math.Pow(2, lfo*p.WahDepth/2)
+			// Chamberlin SVF is stable for f < 2 - q; clamp cutoff well below that.
+			if cutoff < 20 {
+				cutoff = 20
+			} else if cutoff > 8000 {
+				cutoff = 8000
+			}
+			f := 2 * math.Sin(math.Pi*cutoff/float64(p.SampleRate))
+			q := 1.0 / wahQ
+			wahLow += f * wahBand
+			high := sample - wahLow - q*wahBand
+			wahBand += f * high
+			// Band-pass output peak gain is ~Q; scale by 1/Q so the wet stays near unity.
+			sample = wahBand * q
+		}
 		env := Envelope(t, p.Duration, p.Attack, p.Decay, p.Sustain, p.Release)
 		amp := p.Volume
 		if p.TremoloEnabled && p.TremoloDepth > 0 {

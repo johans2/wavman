@@ -102,10 +102,12 @@ type UI struct {
 	vibratoDepth, vibratoRate                       *sliderState
 	arpSemi1, arpSemi2, arpRate                     *sliderState
 	tremoloDepth, tremoloRate                       *sliderState
+	wahCenter, wahDepth, wahRate                    *sliderState
 	noisePitch, metallicPitch, noiseFilterCutoff    *sliderState
 	crushBits, crushRate                            *sliderState
 
 	dutyEnabled, vibratoEnabled, arpEnabled, tremoloEnabled widget.Bool
+	wahEnabled                                              widget.Bool
 	noisePitchEnabled, noiseMetallic, noiseFilterEnabled    widget.Bool
 
 	playBtn, backBtn, forwardBtn, exportBtn widget.Clickable
@@ -157,6 +159,9 @@ func newUI(player *Player) *UI {
 		arpRate:        newSlider("Rate", 4, 32, p.ArpRate, func(v float64) string { return fmt.Sprintf("%.0f Hz", v) }),
 		tremoloDepth:   newSlider("Depth", 0, 1, p.TremoloDepth, func(v float64) string { return fmt.Sprintf("%.2f", v) }),
 		tremoloRate:    newSlider("Rate", 0.5, 20, p.TremoloRate, func(v float64) string { return fmt.Sprintf("%.1f Hz", v) }),
+		wahCenter:      newSlider("Center", 200, 3000, p.WahCenter, func(v float64) string { return fmt.Sprintf("%.0f Hz", v) }),
+		wahDepth:       newSlider("Depth", 0.5, 4, p.WahDepth, func(v float64) string { return fmt.Sprintf("%.1f oct", v) }),
+		wahRate:        newSlider("Rate", 0.5, 15, p.WahRate, func(v float64) string { return fmt.Sprintf("%.1f Hz", v) }),
 		noisePitch:     newSlider("Pitch", 100, 22050, p.NoisePitch, func(v float64) string { return fmt.Sprintf("%.0f Hz", v) }),
 		metallicPitch:  newSlider("Pitch", 30, 5000, p.MetallicPitch, func(v float64) string { return fmt.Sprintf("%.0f Hz", v) }),
 		noiseFilterCutoff: newSlider("Cutoff", 100, 20000, p.NoiseFilterCutoff, func(v float64) string { return fmt.Sprintf("%.0f Hz", v) }),
@@ -201,6 +206,10 @@ func (ui *UI) readParams() Params {
 	p.TremoloEnabled = ui.tremoloEnabled.Value
 	p.TremoloDepth = ui.tremoloDepth.Get()
 	p.TremoloRate = ui.tremoloRate.Get()
+	p.WahEnabled = ui.wahEnabled.Value
+	p.WahCenter = ui.wahCenter.Get()
+	p.WahDepth = ui.wahDepth.Get()
+	p.WahRate = ui.wahRate.Get()
 	p.NoisePitchEnabled = ui.noisePitchEnabled.Value
 	p.NoisePitch = ui.noisePitch.Get()
 	p.NoiseMetallic = ui.noiseMetallic.Value
@@ -237,6 +246,10 @@ func (ui *UI) syncSlidersFromParams() {
 	ui.tremoloEnabled.Value = ui.params.TremoloEnabled
 	ui.tremoloDepth.Set(ui.params.TremoloDepth)
 	ui.tremoloRate.Set(ui.params.TremoloRate)
+	ui.wahEnabled.Value = ui.params.WahEnabled
+	ui.wahCenter.Set(ui.params.WahCenter)
+	ui.wahDepth.Set(ui.params.WahDepth)
+	ui.wahRate.Set(ui.params.WahRate)
 	ui.noisePitchEnabled.Value = ui.params.NoisePitchEnabled
 	ui.noisePitch.Set(ui.params.NoisePitch)
 	ui.noiseMetallic.Value = ui.params.NoiseMetallic
@@ -734,6 +747,17 @@ func (ui *UI) modulationContent(gtx layout.Context, th *material.Theme) layout.D
 		children = append(children,
 			layout.Rigid(func(gtx layout.Context) layout.Dimensions { return ui.tremoloDepth.Layout(th, gtx) }),
 			layout.Rigid(func(gtx layout.Context) layout.Dimensions { return ui.tremoloRate.Layout(th, gtx) }),
+		)
+	}
+	children = append(children,
+		layout.Rigid(spacer(6)),
+		layout.Rigid(moduleHeader(th, &ui.wahEnabled, "Wah-wah")),
+	)
+	if ui.wahEnabled.Value {
+		children = append(children,
+			layout.Rigid(func(gtx layout.Context) layout.Dimensions { return ui.wahCenter.Layout(th, gtx) }),
+			layout.Rigid(func(gtx layout.Context) layout.Dimensions { return ui.wahDepth.Layout(th, gtx) }),
+			layout.Rigid(func(gtx layout.Context) layout.Dimensions { return ui.wahRate.Layout(th, gtx) }),
 		)
 	}
 	children = append(children,
