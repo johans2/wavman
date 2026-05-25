@@ -89,8 +89,8 @@ Optional features ("modules") all follow a consistent pattern:
 - `Render` checks `p.XEnabled` before applying the effect.
 
 Current modules:
-- **8-bit**, **Reverse**, **Auto-play** — top-bar checkboxes, single toggles.
-- **Duty cycle**, **Vibrato**, **Arpeggio** — Modulation card (always visible).
+- **Reverse**, **Auto-play** — top-bar checkboxes, single toggles.
+- **Duty cycle**, **Vibrato**, **Arpeggio**, **Tremolo**, **8-bit** — Modulation card (always visible).
 - **Noise Pitch**, **Metallic**, **Filter** — Noise card, visible only when
   the Noise waveform is selected.
 
@@ -153,9 +153,11 @@ For each output sample `i`:
 7. Multiply by `Volume`.
 
 After the loop:
-8. **8-bit**: 4-bit quantize each sample (16 levels, step 0.125). No
-   decimation — earlier 3× decimation caused aliasing harshness; pure
-   bitcrush is enough for the chiptune feel.
+8. **8-bit**: bit-depth quantize each sample to `CrushBits` levels
+   (default 4 bits = 16 levels, NES-authentic). Then optional sample-rate
+   reduction: hold each value for `SampleRate / CrushRate` samples to
+   fake a lower effective rate. `CrushRate >= SampleRate` is a no-op
+   (default 44100 = no decimation, matches prior behavior).
 9. **Reverse**: in-place buffer reverse.
 
 ### Noise pipeline (step 5 branch)
@@ -177,7 +179,7 @@ After either branch, optional one-pole IIR low-pass:
 ## UI layout
 
     +----------------------------------------------------------+
-    | Wave: [Sine][Square][Saw][Triangle][Noise]   [8-bit][Reverse][Auto-play] [Play] [◄][► Mutate] [Export]
+    | Wave: [Sine][Square][Saw][Triangle][Noise]   [Reverse][Auto-play] [Play] [◄][► Mutate] [Export]
     +-------------------+-------------------------------------+
     |                   |                                     |
     |   Presets         |   Waveform                          |

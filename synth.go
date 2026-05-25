@@ -41,8 +41,10 @@ type Params struct {
 
 	Volume float64 // 0..1
 
-	Reverse  bool
-	EightBit bool
+	Reverse   bool
+	EightBit  bool
+	CrushBits int     // 1..8; quantization depth when EightBit is on (4 = NES-authentic).
+	CrushRate float64 // Hz; effective sample rate when EightBit is on. >= SampleRate disables decimation.
 
 	DutyEnabled bool
 	Duty        float64 // 0.05..0.95 for Square wave; 0.5 = symmetric
@@ -82,6 +84,8 @@ func DefaultParams() Params {
 		Sustain:      0.70,
 		Release:      0.20,
 		Volume:       0.80,
+		CrushBits:    4,
+		CrushRate:    44100,
 		Duty:              0.5,
 		VibratoDepth:      30,
 		VibratoRate:       6,
@@ -261,9 +265,14 @@ func Render(p Params) []float32 {
 		}
 	}
 	if p.EightBit {
-		// 4-bit quantization (16 levels) — matches the NES 2A03's effective DAC
-		// depth and is the iconic stepped/chiptune character.
-		const bits = 4
+		// Bit-depth quantization. 4 bits (16 levels) is the NES-authentic default
+		// and the iconic stepped/chiptune character; lower bits get gnarlier.
+		bits := p.CrushBits
+		if bits < 1 {
+			bits = 1
+		} else if bits > 8 {
+			bits = 8
+		}
 		step := float32(2.0 / float64(int(1)<<bits))
 		for i := range out {
 			v := float32(math.Round(float64(out[i]/step))) * step
@@ -273,6 +282,23 @@ func Render(p Params) []float32 {
 				v = -1
 			}
 			out[i] = v
+		}
+		// Optional sample-rate reduction: hold each value for `hold` samples to
+		// fake a lower effective rate. CrushRate >= SampleRate is a no-op.
+		if p.CrushRate > 0 && p.CrushRate < float64(p.SampleRate) {
+			hold := int(math.Round(float64(p.SampleRate) / p.CrushRate))
+			if hold > 1 {
+				for i := 0; i < len(out); i += hold {
+					v := out[i]
+					end := i + hold
+					if end > len(out) {
+						end = len(out)
+					}
+					for j := i + 1; j < end; j++ {
+						out[j] = v
+					}
+				}
+			}
 		}
 	}
 	if p.Reverse {

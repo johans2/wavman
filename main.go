@@ -103,6 +103,7 @@ type UI struct {
 	arpSemi1, arpSemi2, arpRate                     *sliderState
 	tremoloDepth, tremoloRate                       *sliderState
 	noisePitch, metallicPitch, noiseFilterCutoff    *sliderState
+	crushBits, crushRate                            *sliderState
 
 	dutyEnabled, vibratoEnabled, arpEnabled, tremoloEnabled widget.Bool
 	noisePitchEnabled, noiseMetallic, noiseFilterEnabled    widget.Bool
@@ -159,6 +160,8 @@ func newUI(player *Player) *UI {
 		noisePitch:     newSlider("Pitch", 100, 22050, p.NoisePitch, func(v float64) string { return fmt.Sprintf("%.0f Hz", v) }),
 		metallicPitch:  newSlider("Pitch", 30, 5000, p.MetallicPitch, func(v float64) string { return fmt.Sprintf("%.0f Hz", v) }),
 		noiseFilterCutoff: newSlider("Cutoff", 100, 20000, p.NoiseFilterCutoff, func(v float64) string { return fmt.Sprintf("%.0f Hz", v) }),
+		crushBits:      newSlider("Bits", 1, 8, float64(p.CrushBits), func(v float64) string { return fmt.Sprintf("%.0f bit", math.Round(v)) }),
+		crushRate:      newSlider("Rate", 1000, sampleRate, p.CrushRate, func(v float64) string { return fmt.Sprintf("%.0f Hz", v) }),
 		presetBtns:     make(map[string]*widget.Clickable),
 		waveformBtns:   make([]widget.Clickable, len(WaveformNames)),
 		waveformChoice: int(p.Waveform),
@@ -184,6 +187,8 @@ func (ui *UI) readParams() Params {
 	p.Volume = ui.volume.Get()
 	p.Reverse = ui.reverse.Value
 	p.EightBit = ui.eightBit.Value
+	p.CrushBits = int(math.Round(ui.crushBits.Get()))
+	p.CrushRate = ui.crushRate.Get()
 	p.DutyEnabled = ui.dutyEnabled.Value
 	p.Duty = ui.duty.Get()
 	p.VibratoEnabled = ui.vibratoEnabled.Value
@@ -218,6 +223,8 @@ func (ui *UI) syncSlidersFromParams() {
 	ui.waveformChoice = int(ui.params.Waveform)
 	ui.reverse.Value = ui.params.Reverse
 	ui.eightBit.Value = ui.params.EightBit
+	ui.crushBits.Set(float64(ui.params.CrushBits))
+	ui.crushRate.Set(ui.params.CrushRate)
 	ui.dutyEnabled.Value = ui.params.DutyEnabled
 	ui.duty.Set(ui.params.Duty)
 	ui.vibratoEnabled.Value = ui.params.VibratoEnabled
@@ -530,11 +537,6 @@ func (ui *UI) topBar(gtx layout.Context, th *material.Theme) layout.Dimensions {
 	children = append(children,
 		layout.Flexed(1, spacer(0)),
 		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-			cb := material.CheckBox(th, &ui.eightBit, "8-bit")
-			cb.Color = color.NRGBA{R: 220, G: 225, B: 235, A: 255}
-			return layout.Inset{Right: unit.Dp(12)}.Layout(gtx, cb.Layout)
-		}),
-		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
 			cb := material.CheckBox(th, &ui.reverse, "Reverse")
 			cb.Color = color.NRGBA{R: 220, G: 225, B: 235, A: 255}
 			return layout.Inset{Right: unit.Dp(12)}.Layout(gtx, cb.Layout)
@@ -732,6 +734,16 @@ func (ui *UI) modulationContent(gtx layout.Context, th *material.Theme) layout.D
 		children = append(children,
 			layout.Rigid(func(gtx layout.Context) layout.Dimensions { return ui.tremoloDepth.Layout(th, gtx) }),
 			layout.Rigid(func(gtx layout.Context) layout.Dimensions { return ui.tremoloRate.Layout(th, gtx) }),
+		)
+	}
+	children = append(children,
+		layout.Rigid(spacer(6)),
+		layout.Rigid(moduleHeader(th, &ui.eightBit, "8-bit (bitcrush)")),
+	)
+	if ui.eightBit.Value {
+		children = append(children,
+			layout.Rigid(func(gtx layout.Context) layout.Dimensions { return ui.crushBits.Layout(th, gtx) }),
+			layout.Rigid(func(gtx layout.Context) layout.Dimensions { return ui.crushRate.Layout(th, gtx) }),
 		)
 	}
 	return layout.Flex{Axis: layout.Vertical}.Layout(gtx, children...)
