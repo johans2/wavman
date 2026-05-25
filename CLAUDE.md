@@ -102,7 +102,7 @@ relevant card.
 ### Mutation history
 
 `history.go` tracks discrete checkpoints, NOT every slider tweak:
-- Mutate (the ► arrow when at end of history)
+- Mutate button clicks
 - Preset clicks
 - Waveform button clicks
 
@@ -110,9 +110,10 @@ Slider tweaks update the *current* entry in place via `SetCurrent` — they
 don't create new entries but they are preserved when navigating away and
 back. Capped at 10 entries; pushing the 11th drops the oldest (FIFO).
 
-The ► button does double duty: at end of history it generates a new
-mutation (label shows "► Mutate"); otherwise it navigates re-do (label
-shows just "►"). ◄ steps back and is dimmed at history start.
+History navigation and mutation are separate buttons. ◄ steps back and is
+dimmed at history start; ► steps forward (redo) and is dimmed at history
+end. The Mutate button always pushes a new randomized entry onto history,
+truncating any redo tail.
 
 ### Slider helper (`sliderState`)
 
@@ -185,7 +186,7 @@ After either branch, optional one-pole IIR low-pass:
 ## UI layout
 
     +----------------------------------------------------------+
-    | Wave: [Sine][Square][Saw][Triangle][Noise]   [Reverse][Auto-play] [Play] [◄][► Mutate] [Export]
+    | Wave: [Sine][Square][Saw][Triangle][Noise]   [Reverse][Auto-play] [Play] [◄][►][Mutate] [Export]
     +-------------------+-------------------------------------+
     |                   |                                     |
     |   Presets         |   Waveform                          |

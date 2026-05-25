@@ -110,7 +110,7 @@ type UI struct {
 	wahEnabled                                              widget.Bool
 	noisePitchEnabled, noiseMetallic, noiseFilterEnabled    widget.Bool
 
-	playBtn, backBtn, forwardBtn, exportBtn widget.Clickable
+	playBtn, backBtn, forwardBtn, mutateBtn, exportBtn widget.Clickable
 	saveBtn, loadBtn                        widget.Clickable
 	pendingLoad                             atomic.Pointer[Params]
 	presetBtns                              map[string]*widget.Clickable
@@ -444,17 +444,18 @@ func (ui *UI) layout(gtx layout.Context, th *material.Theme) layout.Dimensions {
 		ui.regenerate()
 		ui.play()
 	}
-	if ui.forwardBtn.Clicked(gtx) {
+	if ui.forwardBtn.Clicked(gtx) && !ui.history.AtEnd() {
 		ui.history.SetCurrent(ui.readParams())
-		if ui.history.AtEnd() {
-			ui.mutate()
-			ui.regenerate()
-			ui.history.Push(ui.params)
-		} else {
-			ui.params = ui.history.Forward()
-			ui.syncSlidersFromParams()
-			ui.regenerate()
-		}
+		ui.params = ui.history.Forward()
+		ui.syncSlidersFromParams()
+		ui.regenerate()
+		ui.play()
+	}
+	if ui.mutateBtn.Clicked(gtx) {
+		ui.history.SetCurrent(ui.readParams())
+		ui.mutate()
+		ui.regenerate()
+		ui.history.Push(ui.params)
 		ui.play()
 	}
 	if ui.exportBtn.Clicked(gtx) {
@@ -575,11 +576,17 @@ func (ui *UI) topBar(gtx layout.Context, th *material.Theme) layout.Dimensions {
 			return layout.Inset{Right: unit.Dp(2)}.Layout(gtx, btn.Layout)
 		}),
 		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-			label := "►"
-			if ui.history.AtEnd() {
-				label = "► Mutate"
+			btn := material.Button(th, &ui.forwardBtn, "►")
+			if !ui.history.AtEnd() {
+				btn.Background = color.NRGBA{R: 180, G: 130, B: 60, A: 255}
+			} else {
+				btn.Background = color.NRGBA{R: 80, G: 80, B: 90, A: 255}
 			}
-			btn := material.Button(th, &ui.forwardBtn, label)
+			btn.Inset = layout.Inset{Top: 6, Bottom: 6, Left: 12, Right: 12}
+			return layout.Inset{Right: unit.Dp(6)}.Layout(gtx, btn.Layout)
+		}),
+		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+			btn := material.Button(th, &ui.mutateBtn, "Mutate")
 			btn.Background = color.NRGBA{R: 180, G: 130, B: 60, A: 255}
 			btn.Inset = layout.Inset{Top: 6, Bottom: 6, Left: 12, Right: 12}
 			return layout.Inset{Right: unit.Dp(6)}.Layout(gtx, btn.Layout)
