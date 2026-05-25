@@ -40,6 +40,21 @@ sqweek/dialog, etc.) — they will build fine but won't launch on this machine.
 The `-H=windowsgui` flag is required: without it you get a stray console
 window alongside the GUI. Module is `wavman`, Go 1.25+.
 
+### App icon
+
+The Windows icon is baked into the exe via `rsrc_windows_amd64.syso` in
+the repo root — the Go linker auto-bundles any `.syso` file in the package
+directory, so there's nothing to wire up in code or build flags.
+
+Regenerate (after editing the pixel art in `tools/genicon/main.go`):
+
+    go run ./tools/genicon
+    go run github.com/akavel/rsrc -ico icon.ico -o rsrc_windows_amd64.syso
+
+Both `icon.ico` (source) and `rsrc_windows_amd64.syso` (linker input) are
+committed so a fresh checkout builds with the icon without running the
+generator.
+
 ## Files
 
 - `synth.go` — `Params` struct, `Render()`, `Envelope()`, `PeakRMS()`. The
