@@ -115,6 +115,8 @@ type UI struct {
 
 	keyFocused bool
 
+	leftList widget.List
+
 	playBtn, backBtn, forwardBtn, mutateBtn, exportBtn widget.Clickable
 	saveBtn, loadBtn                        widget.Clickable
 	pendingLoad                             atomic.Pointer[Params]
@@ -178,6 +180,7 @@ func newUI(player *Player) *UI {
 		waveformBtns:   make([]widget.Clickable, len(WaveformNames)),
 		waveformChoice: int(p.Waveform),
 	}
+	ui.leftList.Axis = layout.Vertical
 	for _, name := range PresetNames {
 		ui.presetBtns[name] = &widget.Clickable{}
 	}
@@ -419,20 +422,31 @@ func clampF(v, lo, hi float64) float64 {
 
 func (ui *UI) layout(gtx layout.Context, th *material.Theme) layout.Dimensions {
 	// Global key listener: Space = Play. Register the UI as an event target
-	// and pull any space-key presses. Focus is requested once at startup.
+	// and pull any space-key presses. Focusable widgets (sliders, the
+	// scrollable left list) steal keyboard focus when clicked, so we track
+	// focus via FocusEvent and re-grab it whenever it's lost — otherwise
+	// Space stops working after the first slider interaction. Slider drags
+	// use pointer events, not keyboard focus, so reclaiming focus is safe.
 	event.Op(gtx.Ops, ui)
 	for {
-		ev, ok := gtx.Event(key.Filter{Focus: ui, Name: key.NameSpace})
+		ev, ok := gtx.Event(
+			key.FocusFilter{Target: ui},
+			key.Filter{Focus: ui, Name: key.NameSpace},
+		)
 		if !ok {
 			break
 		}
-		if ke, ok := ev.(key.Event); ok && ke.State == key.Press {
-			ui.play()
+		switch ke := ev.(type) {
+		case key.FocusEvent:
+			ui.keyFocused = ke.Focus
+		case key.Event:
+			if ke.State == key.Press {
+				ui.play()
+			}
 		}
 	}
 	if !ui.keyFocused {
 		gtx.Execute(key.FocusCmd{Tag: ui})
-		ui.keyFocused = true
 	}
 
 	// Apply a pending preset load (handed off from a goroutine via atomic).
@@ -633,87 +647,90 @@ func (ui *UI) topBar(gtx layout.Context, th *material.Theme) layout.Dimensions {
 }
 
 func (ui *UI) leftPanel(gtx layout.Context, th *material.Theme) layout.Dimensions {
-	return cardLayout(gtx, th, "", func(gtx layout.Context) layout.Dimensions {
-		return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
-			layout.Rigid(sectionTitle(th, "Presets")),
-			layout.Rigid(spacer(4)),
-			layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-				cols := 3
-				rows := (len(PresetNames) + cols - 1) / cols
-				items := make([]layout.FlexChild, 0, rows)
-				for r := 0; r < rows; r++ {
-					r := r
-					items = append(items, layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-						rowItems := make([]layout.FlexChild, 0, cols)
-						for c := 0; c < cols; c++ {
-							idx := r*cols + c
-							if idx >= len(PresetNames) {
-								rowItems = append(rowItems, layout.Flexed(1, spacer(0)))
-								continue
-							}
-							name := PresetNames[idx]
-							rowItems = append(rowItems, layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
-								btn := material.Button(th, ui.presetBtns[name], name)
-								btn.Background = color.NRGBA{R: 60, G: 70, B: 95, A: 255}
-								btn.CornerRadius = unit.Dp(4)
-								return layout.Inset{Top: unit.Dp(2), Bottom: unit.Dp(2), Left: unit.Dp(2), Right: unit.Dp(2)}.Layout(gtx, btn.Layout)
-							}))
+	sections := []layout.Widget{
+		sectionTitle(th, "Presets"),
+		spacer(4),
+		func(gtx layout.Context) layout.Dimensions {
+			cols := 3
+			rows := (len(PresetNames) + cols - 1) / cols
+			items := make([]layout.FlexChild, 0, rows)
+			for r := 0; r < rows; r++ {
+				r := r
+				items = append(items, layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+					rowItems := make([]layout.FlexChild, 0, cols)
+					for c := 0; c < cols; c++ {
+						idx := r*cols + c
+						if idx >= len(PresetNames) {
+							rowItems = append(rowItems, layout.Flexed(1, spacer(0)))
+							continue
 						}
-						return layout.Flex{Axis: layout.Horizontal}.Layout(gtx, rowItems...)
-					}))
-				}
-				return layout.Flex{Axis: layout.Vertical}.Layout(gtx, items...)
-			}),
-			layout.Rigid(spacer(6)),
-			layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-				return layout.Flex{Axis: layout.Horizontal}.Layout(gtx,
-					layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
-						btn := material.Button(th, &ui.saveBtn, "Save…")
-						btn.Background = color.NRGBA{R: 90, G: 110, B: 170, A: 255}
-						btn.CornerRadius = unit.Dp(4)
-						return layout.Inset{Top: unit.Dp(2), Bottom: unit.Dp(2), Left: unit.Dp(2), Right: unit.Dp(2)}.Layout(gtx, btn.Layout)
-					}),
-					layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
-						btn := material.Button(th, &ui.loadBtn, "Load…")
-						btn.Background = color.NRGBA{R: 90, G: 110, B: 170, A: 255}
-						btn.CornerRadius = unit.Dp(4)
-						return layout.Inset{Top: unit.Dp(2), Bottom: unit.Dp(2), Left: unit.Dp(2), Right: unit.Dp(2)}.Layout(gtx, btn.Layout)
-					}),
-				)
-			}),
-			layout.Rigid(spacer(12)),
-			layout.Rigid(sectionTitle(th, "Parameters")),
-			layout.Rigid(spacer(4)),
-			layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-				return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
-					layout.Rigid(func(gtx layout.Context) layout.Dimensions { return ui.duration.Layout(th, gtx) }),
-					layout.Rigid(func(gtx layout.Context) layout.Dimensions { return ui.startFreq.Layout(th, gtx) }),
-					layout.Rigid(func(gtx layout.Context) layout.Dimensions { return ui.endFreq.Layout(th, gtx) }),
-					layout.Rigid(spacer(6)),
-					layout.Rigid(func(gtx layout.Context) layout.Dimensions { return ui.attack.Layout(th, gtx) }),
-					layout.Rigid(func(gtx layout.Context) layout.Dimensions { return ui.decay.Layout(th, gtx) }),
-					layout.Rigid(func(gtx layout.Context) layout.Dimensions { return ui.sustain.Layout(th, gtx) }),
-					layout.Rigid(func(gtx layout.Context) layout.Dimensions { return ui.release.Layout(th, gtx) }),
-					layout.Rigid(spacer(6)),
-					layout.Rigid(func(gtx layout.Context) layout.Dimensions { return ui.volume.Layout(th, gtx) }),
-				)
-			}),
-			layout.Rigid(spacer(12)),
-			layout.Rigid(sectionTitle(th, "Modulation")),
-			layout.Rigid(spacer(4)),
-			layout.Rigid(func(gtx layout.Context) layout.Dimensions { return ui.modulationContent(gtx, th) }),
-			layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-				if ui.waveformChoice != int(Noise) {
-					return layout.Dimensions{}
-				}
-				return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
-					layout.Rigid(spacer(12)),
-					layout.Rigid(sectionTitle(th, "Noise")),
-					layout.Rigid(spacer(4)),
-					layout.Rigid(func(gtx layout.Context) layout.Dimensions { return ui.noiseContent(gtx, th) }),
-				)
-			}),
-		)
+						name := PresetNames[idx]
+						rowItems = append(rowItems, layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
+							btn := material.Button(th, ui.presetBtns[name], name)
+							btn.Background = color.NRGBA{R: 60, G: 70, B: 95, A: 255}
+							btn.CornerRadius = unit.Dp(4)
+							return layout.Inset{Top: unit.Dp(2), Bottom: unit.Dp(2), Left: unit.Dp(2), Right: unit.Dp(2)}.Layout(gtx, btn.Layout)
+						}))
+					}
+					return layout.Flex{Axis: layout.Horizontal}.Layout(gtx, rowItems...)
+				}))
+			}
+			return layout.Flex{Axis: layout.Vertical}.Layout(gtx, items...)
+		},
+		spacer(6),
+		func(gtx layout.Context) layout.Dimensions {
+			return layout.Flex{Axis: layout.Horizontal}.Layout(gtx,
+				layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
+					btn := material.Button(th, &ui.saveBtn, "Save…")
+					btn.Background = color.NRGBA{R: 90, G: 110, B: 170, A: 255}
+					btn.CornerRadius = unit.Dp(4)
+					return layout.Inset{Top: unit.Dp(2), Bottom: unit.Dp(2), Left: unit.Dp(2), Right: unit.Dp(2)}.Layout(gtx, btn.Layout)
+				}),
+				layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
+					btn := material.Button(th, &ui.loadBtn, "Load…")
+					btn.Background = color.NRGBA{R: 90, G: 110, B: 170, A: 255}
+					btn.CornerRadius = unit.Dp(4)
+					return layout.Inset{Top: unit.Dp(2), Bottom: unit.Dp(2), Left: unit.Dp(2), Right: unit.Dp(2)}.Layout(gtx, btn.Layout)
+				}),
+			)
+		},
+		spacer(12),
+		sectionTitle(th, "Parameters"),
+		spacer(4),
+		func(gtx layout.Context) layout.Dimensions {
+			return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
+				layout.Rigid(func(gtx layout.Context) layout.Dimensions { return ui.duration.Layout(th, gtx) }),
+				layout.Rigid(func(gtx layout.Context) layout.Dimensions { return ui.startFreq.Layout(th, gtx) }),
+				layout.Rigid(func(gtx layout.Context) layout.Dimensions { return ui.endFreq.Layout(th, gtx) }),
+				layout.Rigid(spacer(6)),
+				layout.Rigid(func(gtx layout.Context) layout.Dimensions { return ui.attack.Layout(th, gtx) }),
+				layout.Rigid(func(gtx layout.Context) layout.Dimensions { return ui.decay.Layout(th, gtx) }),
+				layout.Rigid(func(gtx layout.Context) layout.Dimensions { return ui.sustain.Layout(th, gtx) }),
+				layout.Rigid(func(gtx layout.Context) layout.Dimensions { return ui.release.Layout(th, gtx) }),
+				layout.Rigid(spacer(6)),
+				layout.Rigid(func(gtx layout.Context) layout.Dimensions { return ui.volume.Layout(th, gtx) }),
+			)
+		},
+		spacer(12),
+		sectionTitle(th, "Modulation"),
+		spacer(4),
+		func(gtx layout.Context) layout.Dimensions { return ui.modulationContent(gtx, th) },
+		func(gtx layout.Context) layout.Dimensions {
+			if ui.waveformChoice != int(Noise) {
+				return layout.Dimensions{}
+			}
+			return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
+				layout.Rigid(spacer(12)),
+				layout.Rigid(sectionTitle(th, "Noise")),
+				layout.Rigid(spacer(4)),
+				layout.Rigid(func(gtx layout.Context) layout.Dimensions { return ui.noiseContent(gtx, th) }),
+			)
+		},
+	}
+	return cardLayout(gtx, th, "", func(gtx layout.Context) layout.Dimensions {
+		return material.List(th, &ui.leftList).Layout(gtx, len(sections), func(gtx layout.Context, i int) layout.Dimensions {
+			return sections[i](gtx)
+		})
 	})
 }
 
