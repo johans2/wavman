@@ -32,6 +32,13 @@ import (
 
 const sampleRate = 44100
 
+// importedAudio carries a loaded clip from the file-dialog goroutine to the
+// layout loop (via atomic.Pointer), mirroring how preset loads are handed off.
+type importedAudio struct {
+	samples []float32
+	name    string
+}
+
 type sliderState struct {
 	f      widget.Float
 	min    float64
@@ -118,8 +125,16 @@ type UI struct {
 	leftList widget.List
 
 	playBtn, backBtn, forwardBtn, mutateBtn, exportBtn widget.Clickable
-	saveBtn, loadBtn                        widget.Clickable
+	saveBtn, loadBtn, importWavBtn          widget.Clickable
 	pendingLoad                             atomic.Pointer[Params]
+
+	// Imported WAV clip. When importedClip != nil the app is in import mode:
+	// the synthesizer source is replaced by this buffer and oscillator-only
+	// controls are greyed out. The clip lives here (not in Params) because a
+	// slice would break the Params struct compare used for change detection.
+	importedClip []float32
+	importedName string
+	pendingClip  atomic.Pointer[importedAudio]
 	presetBtns                              map[string]*widget.Clickable
 	waveformBtns                            []widget.Clickable
 	waveformChoice                          int
@@ -191,6 +206,29 @@ func newUI(player *Player) *UI {
 
 func (ui *UI) readParams() Params {
 	p := ui.params
+	if p.Imported {
+		// In import mode only the effects that operate on a sample stream are
+		// live. Everything else (waveform, freqs, duration, vibrato/arp/sweep,
+		// noise) is greyed out and left untouched so it can't clobber the
+		// clip-locked values — notably Duration, which is pinned to clip length.
+		p.Volume = ui.volume.Get()
+		p.Attack = ui.attack.Get()
+		p.Decay = ui.decay.Get()
+		p.Sustain = ui.sustain.Get()
+		p.Release = ui.release.Get()
+		p.Reverse = ui.reverse.Value
+		p.EightBit = ui.eightBit.Value
+		p.CrushBits = int(math.Round(ui.crushBits.Get()))
+		p.CrushRate = ui.crushRate.Get()
+		p.TremoloEnabled = ui.tremoloEnabled.Value
+		p.TremoloDepth = ui.tremoloDepth.Get()
+		p.TremoloRate = ui.tremoloRate.Get()
+		p.WahEnabled = ui.wahEnabled.Value
+		p.WahCenter = ui.wahCenter.Get()
+		p.WahDepth = ui.wahDepth.Get()
+		p.WahRate = ui.wahRate.Get()
+		return p
+	}
 	p.Waveform = Waveform(ui.waveformChoice)
 	p.Duration = ui.duration.Get()
 	p.StartFreq = ui.startFreq.Get()
@@ -277,7 +315,7 @@ func (ui *UI) syncSlidersFromParams() {
 }
 
 func (ui *UI) regenerate() {
-	ui.samples = Render(ui.params)
+	ui.samples = RenderWithSource(ui.params, ui.importedClip)
 	ui.peak, ui.rms = PeakRMS(ui.samples)
 }
 
@@ -296,6 +334,7 @@ func (ui *UI) mutate() {
 	p.Decay = clampF(p.Decay*(0.4+1.2*rand.Float64()), 0, 1.5)
 	p.Sustain = clampF(p.Sustain*(0.5+rand.Float64()), 0, 1)
 	p.Release = clampF(p.Release*(0.4+1.2*rand.Float64()), 0, 1.5)
+	p.Seed = rand.Int63() // fresh noise on each mutation
 	ui.params = p
 	ui.syncSlidersFromParams()
 }
@@ -386,6 +425,68 @@ func (ui *UI) loadPreset() {
 	}()
 }
 
+func (ui *UI) importWav() {
+	cwd, _ := os.Getwd()
+	go func() {
+		path, err := zenity.SelectFile(
+			zenity.Title("Import WAV"),
+			zenity.Filename(cwd),
+			zenity.FileFilters{{Name: "WAV files", Patterns: []string{"*.wav"}, CaseFold: true}},
+		)
+		if errors.Is(err, zenity.ErrCanceled) {
+			return
+		}
+		if err != nil {
+			ui.setStatus("Import dialog failed: "+err.Error(), 6*time.Second)
+			return
+		}
+		clip, truncated, err := ReadWAVMono44k(path)
+		if err != nil {
+			ui.setStatus("Import failed: "+err.Error(), 6*time.Second)
+			return
+		}
+		name := filepath.Base(path)
+		ui.pendingClip.Store(&importedAudio{samples: clip, name: name})
+		msg := "Imported: " + name
+		if truncated {
+			msg += " (truncated to 60 s)"
+		}
+		ui.setStatus(msg, 6*time.Second)
+		if ui.w != nil {
+			ui.w.Invalidate()
+		}
+	}()
+}
+
+// enterImport switches the app into import mode with the given clip. Duration
+// is pinned to the clip's natural length so the envelope spans the whole clip.
+func (ui *UI) enterImport(clip *importedAudio) {
+	ui.importedClip = clip.samples
+	ui.importedName = clip.name
+	ui.params.Imported = true
+	ui.params.Duration = float64(len(clip.samples)) / float64(sampleRate)
+	ui.syncSlidersFromParams()
+	ui.regenerate()
+	ui.play()
+}
+
+// exitImport leaves import mode and returns to the synthesizer, dropping the
+// clip. Called when the user clicks any waveform or preset button. The caller
+// is responsible for whatever synth params come next.
+func (ui *UI) exitImport() {
+	if !ui.params.Imported {
+		return
+	}
+	ui.importedClip = nil
+	ui.importedName = ""
+	ui.params.Imported = false
+	// The clip may have set Duration far beyond the slider's synth range; reset
+	// to a sane value so the synth view isn't stuck at a multi-second duration.
+	if ui.params.Duration > 3.0 {
+		ui.params.Duration = DefaultParams().Duration
+	}
+}
+
 func (ui *UI) setStatus(msg string, dur time.Duration) {
 	ui.statusMu.Lock()
 	ui.statusMsg = msg
@@ -451,6 +552,7 @@ func (ui *UI) layout(gtx layout.Context, th *material.Theme) layout.Dimensions {
 
 	// Apply a pending preset load (handed off from a goroutine via atomic).
 	if loaded := ui.pendingLoad.Swap(nil); loaded != nil {
+		ui.exitImport()
 		ui.history.SetCurrent(ui.readParams())
 		ui.params = *loaded
 		ui.syncSlidersFromParams()
@@ -459,10 +561,16 @@ func (ui *UI) layout(gtx layout.Context, th *material.Theme) layout.Dimensions {
 		ui.play()
 	}
 
+	// Apply a pending WAV import (handed off from the file-dialog goroutine).
+	if clip := ui.pendingClip.Swap(nil); clip != nil {
+		ui.enterImport(clip)
+	}
+
 	immediatePlay := false
 	pushOnChange := false
 	for i := range ui.waveformBtns {
 		if ui.waveformBtns[i].Clicked(gtx) {
+			ui.exitImport() // a waveform choice leaves import mode
 			ui.waveformChoice = i
 			pushOnChange = true
 			if ui.autoPlay.Value {
@@ -472,6 +580,7 @@ func (ui *UI) layout(gtx layout.Context, th *material.Theme) layout.Dimensions {
 	}
 	for _, name := range PresetNames {
 		if ui.presetBtns[name].Clicked(gtx) {
+			ui.exitImport() // a preset leaves import mode
 			ui.history.SetCurrent(ui.readParams())
 			ui.params = ApplyPreset(name)
 			ui.syncSlidersFromParams()
@@ -513,14 +622,21 @@ func (ui *UI) layout(gtx layout.Context, th *material.Theme) layout.Dimensions {
 	if ui.loadBtn.Clicked(gtx) {
 		ui.loadPreset()
 	}
+	if ui.importWavBtn.Clicked(gtx) {
+		ui.importWav()
+	}
 
 	if newP := ui.readParams(); newP != ui.params {
 		ui.params = newP
 		ui.regenerate()
-		if pushOnChange {
-			ui.history.Push(ui.params)
-		} else {
-			ui.history.SetCurrent(ui.params)
+		// Import mode tweaks effects on a clip that isn't a synth-history entry,
+		// so leave history untouched (and ◄/►/Mutate are greyed out anyway).
+		if !ui.params.Imported {
+			if pushOnChange {
+				ui.history.Push(ui.params)
+			} else {
+				ui.history.SetCurrent(ui.params)
+			}
 		}
 		if ui.autoPlay.Value {
 			if immediatePlay {
@@ -565,6 +681,17 @@ func (ui *UI) layout(gtx layout.Context, th *material.Theme) layout.Dimensions {
 			)
 		},
 	)
+}
+
+// grayWrap renders w dimmed and non-interactive when dim is true — used to grey
+// out controls that don't apply to an imported clip. gtx.Disabled() swallows
+// input events so the widget can't be clicked/dragged; PushOpacity fades it.
+func grayWrap(gtx layout.Context, dim bool, w layout.Widget) layout.Dimensions {
+	if !dim {
+		return w(gtx)
+	}
+	defer paint.PushOpacity(gtx.Ops, 0.35).Pop()
+	return w(gtx.Disabled())
 }
 
 func spacer(dp int) layout.Widget {
@@ -612,30 +739,36 @@ func (ui *UI) topBar(gtx layout.Context, th *material.Theme) layout.Dimensions {
 			return layout.Inset{Right: unit.Dp(6)}.Layout(gtx, btn.Layout)
 		}),
 		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-			btn := material.Button(th, &ui.backBtn, "◄")
-			if ui.history.CanBack() {
-				btn.Background = color.NRGBA{R: 180, G: 130, B: 60, A: 255}
-			} else {
-				btn.Background = color.NRGBA{R: 80, G: 80, B: 90, A: 255}
-			}
-			btn.Inset = layout.Inset{Top: 6, Bottom: 6, Left: 12, Right: 12}
-			return layout.Inset{Right: unit.Dp(2)}.Layout(gtx, btn.Layout)
+			return grayWrap(gtx, ui.params.Imported, func(gtx layout.Context) layout.Dimensions {
+				btn := material.Button(th, &ui.backBtn, "◄")
+				if ui.history.CanBack() {
+					btn.Background = color.NRGBA{R: 180, G: 130, B: 60, A: 255}
+				} else {
+					btn.Background = color.NRGBA{R: 80, G: 80, B: 90, A: 255}
+				}
+				btn.Inset = layout.Inset{Top: 6, Bottom: 6, Left: 12, Right: 12}
+				return layout.Inset{Right: unit.Dp(2)}.Layout(gtx, btn.Layout)
+			})
 		}),
 		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-			btn := material.Button(th, &ui.forwardBtn, "►")
-			if !ui.history.AtEnd() {
-				btn.Background = color.NRGBA{R: 180, G: 130, B: 60, A: 255}
-			} else {
-				btn.Background = color.NRGBA{R: 80, G: 80, B: 90, A: 255}
-			}
-			btn.Inset = layout.Inset{Top: 6, Bottom: 6, Left: 12, Right: 12}
-			return layout.Inset{Right: unit.Dp(6)}.Layout(gtx, btn.Layout)
+			return grayWrap(gtx, ui.params.Imported, func(gtx layout.Context) layout.Dimensions {
+				btn := material.Button(th, &ui.forwardBtn, "►")
+				if !ui.history.AtEnd() {
+					btn.Background = color.NRGBA{R: 180, G: 130, B: 60, A: 255}
+				} else {
+					btn.Background = color.NRGBA{R: 80, G: 80, B: 90, A: 255}
+				}
+				btn.Inset = layout.Inset{Top: 6, Bottom: 6, Left: 12, Right: 12}
+				return layout.Inset{Right: unit.Dp(6)}.Layout(gtx, btn.Layout)
+			})
 		}),
 		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-			btn := material.Button(th, &ui.mutateBtn, "Mutate")
-			btn.Background = color.NRGBA{R: 180, G: 130, B: 60, A: 255}
-			btn.Inset = layout.Inset{Top: 6, Bottom: 6, Left: 12, Right: 12}
-			return layout.Inset{Right: unit.Dp(6)}.Layout(gtx, btn.Layout)
+			return grayWrap(gtx, ui.params.Imported, func(gtx layout.Context) layout.Dimensions {
+				btn := material.Button(th, &ui.mutateBtn, "Mutate")
+				btn.Background = color.NRGBA{R: 180, G: 130, B: 60, A: 255}
+				btn.Inset = layout.Inset{Top: 6, Bottom: 6, Left: 12, Right: 12}
+				return layout.Inset{Right: unit.Dp(6)}.Layout(gtx, btn.Layout)
+			})
 		}),
 		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
 			btn := material.Button(th, &ui.exportBtn, "Export WAV")
@@ -694,14 +827,34 @@ func (ui *UI) leftPanel(gtx layout.Context, th *material.Theme) layout.Dimension
 				}),
 			)
 		},
+		spacer(4),
+		func(gtx layout.Context) layout.Dimensions {
+			label := "Import WAV…"
+			bg := color.NRGBA{R: 110, G: 90, B: 150, A: 255}
+			if ui.params.Imported {
+				label = "Imported: " + ui.importedName
+				bg = color.NRGBA{R: 150, G: 110, B: 70, A: 255}
+			}
+			btn := material.Button(th, &ui.importWavBtn, label)
+			btn.Background = bg
+			btn.CornerRadius = unit.Dp(4)
+			return layout.Inset{Top: unit.Dp(2), Bottom: unit.Dp(2), Left: unit.Dp(2), Right: unit.Dp(2)}.Layout(gtx, btn.Layout)
+		},
 		spacer(12),
 		sectionTitle(th, "Parameters"),
 		spacer(4),
 		func(gtx layout.Context) layout.Dimensions {
+			imp := ui.params.Imported
 			return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
-				layout.Rigid(func(gtx layout.Context) layout.Dimensions { return ui.duration.Layout(th, gtx) }),
-				layout.Rigid(func(gtx layout.Context) layout.Dimensions { return ui.startFreq.Layout(th, gtx) }),
-				layout.Rigid(func(gtx layout.Context) layout.Dimensions { return ui.endFreq.Layout(th, gtx) }),
+				layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+					return grayWrap(gtx, imp, func(gtx layout.Context) layout.Dimensions { return ui.duration.Layout(th, gtx) })
+				}),
+				layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+					return grayWrap(gtx, imp, func(gtx layout.Context) layout.Dimensions { return ui.startFreq.Layout(th, gtx) })
+				}),
+				layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+					return grayWrap(gtx, imp, func(gtx layout.Context) layout.Dimensions { return ui.endFreq.Layout(th, gtx) })
+				}),
 				layout.Rigid(spacer(6)),
 				layout.Rigid(func(gtx layout.Context) layout.Dimensions { return ui.attack.Layout(th, gtx) }),
 				layout.Rigid(func(gtx layout.Context) layout.Dimensions { return ui.decay.Layout(th, gtx) }),
@@ -768,78 +921,59 @@ func moduleHeader(th *material.Theme, b *widget.Bool, label string) layout.Widge
 }
 
 func (ui *UI) modulationContent(gtx layout.Context, th *material.Theme) layout.Dimensions {
+	// Duty/Vibrato/Arp/Pulse-sweep all act on the oscillator's frequency, so
+	// they're greyed out for an imported clip. Tremolo/Wah/8-bit operate on the
+	// sample stream and stay live.
+	imp := ui.params.Imported
+
+	// module renders a checkbox header plus its sliders (shown when enabled),
+	// optionally greyed and non-interactive.
+	module := func(dim bool, b *widget.Bool, label string, sliders ...*sliderState) layout.FlexChild {
+		return layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+			return grayWrap(gtx, dim, func(gtx layout.Context) layout.Dimensions {
+				ch := []layout.FlexChild{layout.Rigid(moduleHeader(th, b, label))}
+				if b.Value {
+					for _, s := range sliders {
+						s := s
+						ch = append(ch, layout.Rigid(func(gtx layout.Context) layout.Dimensions { return s.Layout(th, gtx) }))
+					}
+				}
+				return layout.Flex{Axis: layout.Vertical}.Layout(gtx, ch...)
+			})
+		})
+	}
+
 	children := []layout.FlexChild{
-		layout.Rigid(moduleHeader(th, &ui.dutyEnabled, "Duty cycle (Square only)")),
-	}
-	if ui.dutyEnabled.Value {
-		children = append(children, layout.Rigid(func(gtx layout.Context) layout.Dimensions { return ui.duty.Layout(th, gtx) }))
-	}
-	children = append(children,
+		module(imp, &ui.dutyEnabled, "Duty cycle (Square only)", ui.duty),
 		layout.Rigid(spacer(6)),
-		layout.Rigid(moduleHeader(th, &ui.vibratoEnabled, "Vibrato")),
-	)
-	if ui.vibratoEnabled.Value {
-		children = append(children,
-			layout.Rigid(func(gtx layout.Context) layout.Dimensions { return ui.vibratoDepth.Layout(th, gtx) }),
-			layout.Rigid(func(gtx layout.Context) layout.Dimensions { return ui.vibratoRate.Layout(th, gtx) }),
-		)
-	}
-	children = append(children,
+		module(imp, &ui.vibratoEnabled, "Vibrato", ui.vibratoDepth, ui.vibratoRate),
 		layout.Rigid(spacer(6)),
-		layout.Rigid(moduleHeader(th, &ui.arpEnabled, "Arpeggio")),
-	)
-	if ui.arpEnabled.Value {
-		children = append(children,
-			layout.Rigid(func(gtx layout.Context) layout.Dimensions { return ui.arpSemi1.Layout(th, gtx) }),
-			layout.Rigid(func(gtx layout.Context) layout.Dimensions { return ui.arpSemi2.Layout(th, gtx) }),
-			layout.Rigid(func(gtx layout.Context) layout.Dimensions { return ui.arpRate.Layout(th, gtx) }),
-		)
-	}
-	children = append(children,
+		module(imp, &ui.arpEnabled, "Arpeggio", ui.arpSemi1, ui.arpSemi2, ui.arpRate),
 		layout.Rigid(spacer(6)),
-		layout.Rigid(moduleHeader(th, &ui.sweepEnabled, "Pulse sweep")),
-	)
-	if ui.sweepEnabled.Value {
-		children = append(children,
-			layout.Rigid(func(gtx layout.Context) layout.Dimensions { return ui.sweepShift.Layout(th, gtx) }),
-			layout.Rigid(func(gtx layout.Context) layout.Dimensions { return ui.sweepRate.Layout(th, gtx) }),
-			layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-				cb := material.CheckBox(th, &ui.sweepNegate, "Sweep up")
-				cb.Color = color.NRGBA{R: 220, G: 225, B: 235, A: 255}
-				return layout.Inset{Left: unit.Dp(80), Top: unit.Dp(2)}.Layout(gtx, cb.Layout)
-			}),
-		)
-	}
-	children = append(children,
+		// Pulse sweep has an extra "Sweep up" checkbox, so it's built inline.
+		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+			return grayWrap(gtx, imp, func(gtx layout.Context) layout.Dimensions {
+				ch := []layout.FlexChild{layout.Rigid(moduleHeader(th, &ui.sweepEnabled, "Pulse sweep"))}
+				if ui.sweepEnabled.Value {
+					ch = append(ch,
+						layout.Rigid(func(gtx layout.Context) layout.Dimensions { return ui.sweepShift.Layout(th, gtx) }),
+						layout.Rigid(func(gtx layout.Context) layout.Dimensions { return ui.sweepRate.Layout(th, gtx) }),
+						layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+							cb := material.CheckBox(th, &ui.sweepNegate, "Sweep up")
+							cb.Color = color.NRGBA{R: 220, G: 225, B: 235, A: 255}
+							return layout.Inset{Left: unit.Dp(80), Top: unit.Dp(2)}.Layout(gtx, cb.Layout)
+						}),
+					)
+				}
+				return layout.Flex{Axis: layout.Vertical}.Layout(gtx, ch...)
+			})
+		}),
 		layout.Rigid(spacer(6)),
-		layout.Rigid(moduleHeader(th, &ui.tremoloEnabled, "Tremolo")),
-	)
-	if ui.tremoloEnabled.Value {
-		children = append(children,
-			layout.Rigid(func(gtx layout.Context) layout.Dimensions { return ui.tremoloDepth.Layout(th, gtx) }),
-			layout.Rigid(func(gtx layout.Context) layout.Dimensions { return ui.tremoloRate.Layout(th, gtx) }),
-		)
-	}
-	children = append(children,
+		module(false, &ui.tremoloEnabled, "Tremolo", ui.tremoloDepth, ui.tremoloRate),
 		layout.Rigid(spacer(6)),
-		layout.Rigid(moduleHeader(th, &ui.wahEnabled, "Wah-wah")),
-	)
-	if ui.wahEnabled.Value {
-		children = append(children,
-			layout.Rigid(func(gtx layout.Context) layout.Dimensions { return ui.wahCenter.Layout(th, gtx) }),
-			layout.Rigid(func(gtx layout.Context) layout.Dimensions { return ui.wahDepth.Layout(th, gtx) }),
-			layout.Rigid(func(gtx layout.Context) layout.Dimensions { return ui.wahRate.Layout(th, gtx) }),
-		)
-	}
-	children = append(children,
+		module(false, &ui.wahEnabled, "Wah-wah", ui.wahCenter, ui.wahDepth, ui.wahRate),
 		layout.Rigid(spacer(6)),
-		layout.Rigid(moduleHeader(th, &ui.eightBit, "8-bit (bitcrush)")),
-	)
-	if ui.eightBit.Value {
-		children = append(children,
-			layout.Rigid(func(gtx layout.Context) layout.Dimensions { return ui.crushBits.Layout(th, gtx) }),
-			layout.Rigid(func(gtx layout.Context) layout.Dimensions { return ui.crushRate.Layout(th, gtx) }),
-		)
+		module(false, &ui.eightBit, "8-bit (bitcrush)", ui.crushBits, ui.crushRate),
 	}
 	return layout.Flex{Axis: layout.Vertical}.Layout(gtx, children...)
 }
@@ -864,8 +998,12 @@ func (ui *UI) rightPanel(gtx layout.Context, th *material.Theme) layout.Dimensio
 			}),
 			layout.Rigid(spacer(10)),
 			layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-				txt := fmt.Sprintf("Peak: %.3f    RMS: %.3f    Samples: %d    (%d Hz, %.2f s)",
-					ui.peak, ui.rms, len(ui.samples), sampleRate, ui.params.Duration)
+				src := "synth"
+				if ui.params.Imported {
+					src = ui.importedName
+				}
+				txt := fmt.Sprintf("Peak: %.3f    RMS: %.3f    Samples: %d    (%d Hz, %.2f s)    src: %s",
+					ui.peak, ui.rms, len(ui.samples), sampleRate, ui.params.Duration, src)
 				return material.Label(th, unit.Sp(13), txt).Layout(gtx)
 			}),
 		)

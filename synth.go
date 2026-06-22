@@ -31,6 +31,12 @@ type Params struct {
 	Duration   float64 // seconds
 	SampleRate int
 
+	// Seed seeds the noise generator's PRNG. Holding it in Params makes the
+	// Noise waveform reproducible: the same params always render the same
+	// noise, so toggling an effect on/off no longer reshuffles it. A fresh
+	// seed is drawn only on Mutate and preset application.
+	Seed int64
+
 	StartFreq float64 // Hz
 	EndFreq   float64 // Hz (for pitch sweep)
 
@@ -40,6 +46,13 @@ type Params struct {
 	Release float64 // seconds
 
 	Volume float64 // 0..1
+
+	// Imported is true when the sound source is a loaded WAV clip rather than
+	// the synthesizer. The oscillator/frequency stage is bypassed; only the
+	// effects stage (wah, envelope, volume, tremolo, bitcrush, reverse) applies.
+	// The clip samples themselves live on the UI, not here, so Params stays
+	// comparable for change detection.
+	Imported bool
 
 	Reverse   bool
 	EightBit  bool
@@ -91,6 +104,7 @@ func DefaultParams() Params {
 		Waveform:     Sine,
 		Duration:     0.5,
 		SampleRate:   44100,
+		Seed:         1,
 		StartFreq:    440,
 		EndFreq:      440,
 		Attack:       0.01,
@@ -162,7 +176,22 @@ func Envelope(t, d, a, dec, s, r float64) float64 {
 
 // Render synthesises the sound into a mono float32 buffer in [-1, 1].
 func Render(p Params) []float32 {
-	n := int(p.Duration * float64(p.SampleRate))
+	return RenderWithSource(p, nil)
+}
+
+// RenderWithSource produces the output buffer. When source is non-nil the
+// oscillator/frequency stage is bypassed and source samples are fed straight
+// into the effects stage (wah → envelope → volume → tremolo → bitcrush →
+// reverse). The output length matches the source length; callers should set
+// p.Duration to the source length so the envelope spans the whole clip.
+func RenderWithSource(p Params, source []float32) []float32 {
+	imported := source != nil
+	var n int
+	if imported {
+		n = len(source)
+	} else {
+		n = int(p.Duration * float64(p.SampleRate))
+	}
 	if n <= 0 {
 		return nil
 	}
@@ -170,7 +199,9 @@ func Render(p Params) []float32 {
 	phase := 0.0
 	twoPi := 2 * math.Pi
 
-	// Noise generator state (persists across samples).
+	// Noise generator state (persists across samples). The PRNG is seeded from
+	// p.Seed so a given Params always produces the same noise (see Params.Seed).
+	noiseRand := rand.New(rand.NewSource(p.Seed))
 	var (
 		lfsr            uint16 = 1
 		lfsrPhase       float64
@@ -193,115 +224,127 @@ func Render(p Params) []float32 {
 
 	for i := 0; i < n; i++ {
 		t := float64(i) / float64(p.SampleRate)
-		progress := t / p.Duration
-		freq := p.StartFreq + (p.EndFreq-p.StartFreq)*progress
-
-		if p.VibratoEnabled && p.VibratoDepth > 0 {
-			cents := p.VibratoDepth * math.Sin(2*math.Pi*p.VibratoRate*t)
-			freq *= math.Pow(2, cents/1200)
-		}
-		if p.ArpEnabled && p.ArpRate > 0 {
-			step := int(math.Floor(t*p.ArpRate)) % 3
-			var semis float64
-			switch step {
-			case 1:
-				semis = p.ArpSemitone1
-			case 2:
-				semis = p.ArpSemitone2
-			}
-			if semis != 0 {
-				freq *= math.Pow(2, semis/12)
-			}
-		}
-		if p.SweepEnabled && p.SweepRate > 0 {
-			for t >= sweepNextTick {
-				shift := int(math.Round(p.SweepShift))
-				if shift < 1 {
-					shift = 1
-				} else if shift > 8 {
-					shift = 8
-				}
-				delta := 1.0 / float64(int(1)<<shift)
-				if p.SweepNegate {
-					sweepFactor *= 1.0 / (1.0 - delta)
-				} else {
-					sweepFactor *= 1.0 / (1.0 + delta)
-				}
-				sweepNextTick += 1.0 / p.SweepRate
-			}
-			freq *= sweepFactor
-			if freq < 10 {
-				freq = 10
-			} else if freq > 12000 {
-				freq = 12000
-			}
-		}
 
 		var sample float64
-		switch p.Waveform {
-		case Sine:
-			sample = math.Sin(phase)
-		case Square:
-			duty := 0.5
-			if p.DutyEnabled {
-				duty = p.Duty
+		if imported {
+			// Imported clip: the source IS the sample. Skip the entire
+			// oscillator/frequency stage (waveform, vibrato, arp, sweep).
+			sample = float64(source[i])
+		} else {
+			progress := t / p.Duration
+			freq := p.StartFreq + (p.EndFreq-p.StartFreq)*progress
+
+			if p.VibratoEnabled && p.VibratoDepth > 0 {
+				cents := p.VibratoDepth * math.Sin(2*math.Pi*p.VibratoRate*t)
+				freq *= math.Pow(2, cents/1200)
 			}
-			if math.Mod(phase, twoPi)/twoPi < duty {
-				sample = 1
-			} else {
-				sample = -1
-			}
-		case Saw:
-			ph := math.Mod(phase, twoPi) / twoPi
-			sample = 2*ph - 1
-		case Triangle:
-			ph := math.Mod(phase, twoPi) / twoPi
-			if ph < 0.5 {
-				sample = -1 + 4*ph
-			} else {
-				sample = 3 - 4*ph
-			}
-		case Noise:
-			if p.NoiseMetallic {
-				// NES short-mode LFSR: 15-bit shift register, feedback = bit0 XOR bit6,
-				// period 93. Output fundamental = LFSR clock / 93. A fractional phase
-				// accumulator advances the LFSR by clockHz/sampleRate steps per output
-				// sample, so the metallic pitch is continuously controllable from a slow
-				// rattle up to a high clang regardless of output sample rate.
-				lfsrPhase += 93.0 * p.MetallicPitch / float64(p.SampleRate)
-				for lfsrPhase >= 1 {
-					bit := (lfsr ^ (lfsr >> 6)) & 1
-					lfsr = (lfsr >> 1) | (bit << 14)
-					lfsrPhase--
+			if p.ArpEnabled && p.ArpRate > 0 {
+				step := int(math.Floor(t*p.ArpRate)) % 3
+				var semis float64
+				switch step {
+				case 1:
+					semis = p.ArpSemitone1
+				case 2:
+					semis = p.ArpSemitone2
 				}
-				if lfsr&1 == 0 {
+				if semis != 0 {
+					freq *= math.Pow(2, semis/12)
+				}
+			}
+			if p.SweepEnabled && p.SweepRate > 0 {
+				for t >= sweepNextTick {
+					shift := int(math.Round(p.SweepShift))
+					if shift < 1 {
+						shift = 1
+					} else if shift > 8 {
+						shift = 8
+					}
+					delta := 1.0 / float64(int(1)<<shift)
+					if p.SweepNegate {
+						sweepFactor *= 1.0 / (1.0 - delta)
+					} else {
+						sweepFactor *= 1.0 / (1.0 + delta)
+					}
+					sweepNextTick += 1.0 / p.SweepRate
+				}
+				freq *= sweepFactor
+				if freq < 10 {
+					freq = 10
+				} else if freq > 12000 {
+					freq = 12000
+				}
+			}
+
+			switch p.Waveform {
+			case Sine:
+				sample = math.Sin(phase)
+			case Square:
+				duty := 0.5
+				if p.DutyEnabled {
+					duty = p.Duty
+				}
+				if math.Mod(phase, twoPi)/twoPi < duty {
 					sample = 1
 				} else {
 					sample = -1
 				}
-			} else {
-				holdSamples := 1
-				if p.NoisePitchEnabled && p.NoisePitch > 0 {
-					holdSamples = int(float64(p.SampleRate) / p.NoisePitch)
-					if holdSamples < 1 {
-						holdSamples = 1
+			case Saw:
+				ph := math.Mod(phase, twoPi) / twoPi
+				sample = 2*ph - 1
+			case Triangle:
+				ph := math.Mod(phase, twoPi) / twoPi
+				if ph < 0.5 {
+					sample = -1 + 4*ph
+				} else {
+					sample = 3 - 4*ph
+				}
+			case Noise:
+				if p.NoiseMetallic {
+					// NES short-mode LFSR: 15-bit shift register, feedback = bit0 XOR bit6,
+					// period 93. Output fundamental = LFSR clock / 93. A fractional phase
+					// accumulator advances the LFSR by clockHz/sampleRate steps per output
+					// sample, so the metallic pitch is continuously controllable from a slow
+					// rattle up to a high clang regardless of output sample rate.
+					lfsrPhase += 93.0 * p.MetallicPitch / float64(p.SampleRate)
+					for lfsrPhase >= 1 {
+						bit := (lfsr ^ (lfsr >> 6)) & 1
+						lfsr = (lfsr >> 1) | (bit << 14)
+						lfsrPhase--
 					}
+					if lfsr&1 == 0 {
+						sample = 1
+					} else {
+						sample = -1
+					}
+				} else {
+					holdSamples := 1
+					if p.NoisePitchEnabled && p.NoisePitch > 0 {
+						holdSamples = int(float64(p.SampleRate) / p.NoisePitch)
+						if holdSamples < 1 {
+							holdSamples = 1
+						}
+					}
+					if noiseHoldRemain <= 0 {
+						noiseHoldVal = noiseRand.Float64()*2 - 1
+						noiseHoldRemain = holdSamples
+					}
+					sample = noiseHoldVal
+					noiseHoldRemain--
 				}
-				if noiseHoldRemain <= 0 {
-					noiseHoldVal = rand.Float64()*2 - 1
-					noiseHoldRemain = holdSamples
+
+				if p.NoiseFilterEnabled && p.NoiseFilterCutoff > 0 {
+					// One-pole IIR low-pass: y[n] = y[n-1] + a*(x[n] - y[n-1])
+					rc := 1.0 / (2 * math.Pi * p.NoiseFilterCutoff)
+					dt := 1.0 / float64(p.SampleRate)
+					a := dt / (rc + dt)
+					noiseFilterY += a * (sample - noiseFilterY)
+					sample = noiseFilterY
 				}
-				sample = noiseHoldVal
-				noiseHoldRemain--
 			}
 
-			if p.NoiseFilterEnabled && p.NoiseFilterCutoff > 0 {
-				// One-pole IIR low-pass: y[n] = y[n-1] + a*(x[n] - y[n-1])
-				rc := 1.0 / (2 * math.Pi * p.NoiseFilterCutoff)
-				dt := 1.0 / float64(p.SampleRate)
-				a := dt / (rc + dt)
-				noiseFilterY += a * (sample - noiseFilterY)
-				sample = noiseFilterY
+			phase += twoPi * freq / float64(p.SampleRate)
+			if phase > twoPi {
+				phase -= twoPi
 			}
 		}
 
@@ -330,11 +373,6 @@ func Render(p Params) []float32 {
 			amp *= 1 - p.TremoloDepth + p.TremoloDepth*lfo
 		}
 		out[i] = float32(sample * env * amp)
-
-		phase += twoPi * freq / float64(p.SampleRate)
-		if phase > twoPi {
-			phase -= twoPi
-		}
 	}
 	if p.EightBit {
 		// Bit-depth quantization. 4 bits (16 levels) is the NES-authentic default

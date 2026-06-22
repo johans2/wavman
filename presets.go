@@ -68,5 +68,6 @@ func ApplyPreset(name string) Params {
 		p.Release = 0.04
 		p.Volume = 0.8
 	}
+	p.Seed = rand.Int63() // fresh noise for each preset application
 	return p
 }

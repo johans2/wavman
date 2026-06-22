@@ -61,6 +61,10 @@ generator.
   full synthesis pipeline (see below).
 - `wav.go` — 16-bit PCM mono WAV writer, used both for file export and for
   building the byte buffer the oto player consumes.
+- `wavread.go` — WAV *reader* for the import feature. `ReadWAVMono44k`
+  parses RIFF/`fmt `/`data`, decodes PCM 8/16/24/32-bit + IEEE float 32/64
+  (incl. WAVE_FORMAT_EXTENSIBLE), downmixes to mono, and linearly resamples
+  to 44.1 kHz. Capped at 60 s (`maxImportSamples`).
 - `presets.go` — bfxr-style preset templates (Pickup, Laser, Explosion, Hit,
   Jump, Blip). Each returns a randomized `Params`.
 - `player.go` — oto/v3 singleton wrapper. One process-wide audio context,
@@ -93,6 +97,34 @@ differs from the previous `ui.params` (`newP != ui.params`), `Render()`
 refreshes the samples, which updates the waveform view, the peak/RMS
 readout, and triggers playback when auto-play is on (or immediately for
 discrete button clicks like waveform/preset).
+
+### Import mode
+
+A loaded WAV clip replaces the synthesizer as the sound source. Clicking
+**Import WAV…** (left panel) opens a file dialog on a goroutine; the decoded
+clip (mono, 44.1 kHz) is handed back via `ui.pendingClip` (atomic pointer,
+same pattern as preset loads) and `enterImport` switches the app into import
+mode. Clicking any **waveform or preset button** calls `exitImport` and
+returns to the synthesizer.
+
+In import mode:
+- The clip lives on `UI.importedClip`, **not** in `Params` (a slice would
+  break the `Params` struct compare). `Params.Imported bool` is the flag.
+- `regenerate` calls `RenderWithSource(ui.params, ui.importedClip)`; the
+  oscillator/frequency stage is bypassed and the clip feeds the effects
+  stage (wah → envelope → volume → tremolo → bitcrush → reverse).
+- `Duration` is pinned to the clip's natural length; the ADSR envelope spans
+  the whole clip.
+- `readParams` takes an import-mode branch that reads **only** the effect
+  knobs that apply to a sample stream, leaving clip-locked fields (waveform,
+  freqs, Duration, vibrato/arp/sweep, noise) untouched — otherwise the
+  greyed Duration slider's clamped value would clobber the real clip length.
+- Controls that only make sense for a synthesized oscillator are **greyed
+  out in place** (visible but dimmed + non-interactive) via `grayWrap`
+  (`paint.PushOpacity` + `gtx.Disabled()`): Duration/Start Hz/End Hz,
+  Duty/Vibrato/Arp/Pulse-sweep, and ◄/►/Mutate. Tremolo/Wah/8-bit/Reverse/
+  Volume/ADSR stay live.
+- History is left untouched while imported (the clip isn't a synth entry).
 
 ### Modules pattern
 
@@ -156,10 +188,16 @@ Discrete clicks (waveform/preset/mutate) bypass the debounce via the
 
 ## Audio pipeline (`Render`)
 
+`Render(p)` is a thin wrapper over `RenderWithSource(p, nil)`. When a
+non-nil source buffer is passed (import mode), steps 1–6 below (the
+oscillator/frequency stage) are skipped and `source[i]` is used directly;
+the effects stage (steps 7–11) applies unchanged to either source. Output
+length matches the source length when imported.
+
 State persisted across the per-sample loop (LFSR, sample-and-hold
 counter, filter accumulator) is declared above the loop.
 
-For each output sample `i`:
+For each output sample `i` (synth path):
 1. `t = i / SampleRate`, `progress = t / Duration`
 2. `freq = StartFreq + (EndFreq - StartFreq) * progress`
 3. If Vibrato enabled: sine LFO modulates freq by `VibratoDepth` cents at
@@ -244,6 +282,12 @@ add another full module.
 - The `Render` loop is hot; persistent state (LFSR, hold counters, filter
   history) is declared above the loop and mutated in place per sample. If
   you add new noise/modulation state, follow that pattern.
+- **`Render` must stay a pure function of `Params`** so toggling an effect
+  on/off is non-destructive. The non-metallic noise generator therefore
+  seeds a *local* PRNG from `Params.Seed` (never the global `math/rand`) —
+  same params, same noise. A fresh `Seed` is drawn only on Mutate and preset
+  application. Metallic noise is already deterministic (LFSR seeds to 1).
+  `destructive_test.go` guards this (determinism + on→off baseline).
 - The player allows only one sound at a time; a new `Play()` cancels the
   old one. The oto context is a process-wide singleton created once via
   `GetPlayer`.
